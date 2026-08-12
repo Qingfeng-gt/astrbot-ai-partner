@@ -57,7 +57,7 @@ _SITUATION_MARK = "<!-- hanhan-situation -->"
 _PLUGIN_DIR = Path(__file__).parent
 # 插件名/版本（Web API 路由前缀与页面展示用，版本与 metadata.yaml 同步）
 _PLUGIN_NAME = "astrbot_plugin_hanhan"
-_PLUGIN_VERSION = "1.0.27"
+_PLUGIN_VERSION = "1.0.28"
 
 
 def _fmt_window(window: tuple[int, int]) -> str:
@@ -146,35 +146,7 @@ _DEFAULT_BEHAVIOR: dict = {
         "avoid_repeat": 2,
         "rate_max": 4,
         "rate_window": 600,
-        "tags": {
-          "blobcatwave.png": [
-            "开心",
-            "打招呼",
-            "猫"
-          ],
-          "blobcatlove.png": [
-            "爱你",
-            "贴贴",
-            "猫"
-          ],
-          "blobcatmelt.png": [
-            "开心",
-            "撒娇",
-            "融化",
-            "猫"
-          ],
-          "blobcatsnuggle.png": [
-            "贴贴",
-            "安慰",
-            "抱抱",
-            "猫"
-          ],
-          "blobcatheartbroken.png": [
-            "心碎",
-            "难过",
-            "猫"
-          ]
-        }
+        "tags": {}
       },
       "sticker_emotion": {
         "开心": [
