@@ -28,7 +28,9 @@
     "merge_window": 3.5,
     "merge_max_wait": 2.5,
     "merge_only_private": true,
-    "max_reply_parts": 6
+    "max_reply_parts": 6,
+    "merge_max_total": 15.0,
+    "sticker_only_prob": 0.4
   },
   "sticker": {
     "avoid_repeat": 2,

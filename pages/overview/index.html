@@ -220,7 +220,14 @@
           <input type="number" id="rp-merge-window" min="0" max="60" style="width: 70px" />
           <span class="muted">秒 + 额外等待</span>
           <input type="number" id="rp-merge-extra" min="0" max="60" style="width: 70px" />
+          <span class="muted">秒，上限</span>
+          <input type="number" id="rp-merge-total" min="0" max="60" style="width: 70px" />
           <span class="muted">秒</span>
+        </div>
+        <div class="cfg-row">
+          <label>纯表情包消息回应概率：表情包单独发时不回复文字，按此概率回一张表情包（其余静默）</label>
+          <input type="range" id="rp-sticker-prob" min="0" max="100" step="5" style="flex:1" />
+          <span class="muted" id="rp-sticker-prob-val" style="min-width: 44px"></span>
         </div>
         <div class="cfg-row">
           <label>补发概率：LLM 没标表情包时按此概率推断情绪补一张</label>
@@ -493,6 +500,12 @@
           if (rp.max_reply_parts != null) $("rp-max-parts").value = rp.max_reply_parts;
           if (rp.merge_window != null) $("rp-merge-window").value = rp.merge_window;
           if (rp.merge_max_wait != null) $("rp-merge-extra").value = rp.merge_max_wait;
+          if (rp.merge_max_total != null) $("rp-merge-total").value = rp.merge_max_total;
+          $("rp-sticker-prob").value = Math.round((rp.sticker_only_prob != null ? rp.sticker_only_prob : 0.4) * 100);
+          $("rp-sticker-prob-val").textContent = $("rp-sticker-prob").value + "%";
+          $("rp-sticker-prob").addEventListener("input", () => {
+            $("rp-sticker-prob-val").textContent = $("rp-sticker-prob").value + "%";
+          });
           $("m-boost").value = Math.round((rp.boost_prob != null ? rp.boost_prob : st.boost_prob) * 100);
           $("m-boost-val").textContent = $("m-boost").value + "%";
           if (sk.rate_max != null) $("m-rate-max").value = sk.rate_max;
@@ -534,6 +547,8 @@
                 max_reply_parts: Number($("rp-max-parts").value),
                 merge_window: Number($("rp-merge-window").value),
                 merge_max_wait: Number($("rp-merge-extra").value),
+                merge_max_total: Number($("rp-merge-total").value),
+                sticker_only_prob: Number($("rp-sticker-prob").value) / 100,
                 boost_prob: Number($("m-boost").value) / 100,
                 rate_max: Number($("m-rate-max").value),
                 rate_window: Number($("m-rate-window").value),

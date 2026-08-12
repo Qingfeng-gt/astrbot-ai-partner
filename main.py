@@ -57,7 +57,7 @@ _SITUATION_MARK = "<!-- hanhan-situation -->"
 _PLUGIN_DIR = Path(__file__).parent
 # 插件名/版本（Web API 路由前缀与页面展示用，版本与 metadata.yaml 同步）
 _PLUGIN_NAME = "astrbot_plugin_hanhan"
-_PLUGIN_VERSION = "1.0.31"
+_PLUGIN_VERSION = "1.0.32"
 
 
 def _fmt_window(window: tuple[int, int]) -> str:
@@ -141,7 +141,9 @@ _DEFAULT_BEHAVIOR: dict = {
         "merge_window": 3.5,
         "merge_max_wait": 2.5,
         "merge_only_private": True,
-        "max_reply_parts": 6
+        "max_reply_parts": 6,
+        "merge_max_total": 15.0,
+        "sticker_only_prob": 0.4
       },
       "sticker": {
         "avoid_repeat": 2,
@@ -370,6 +372,7 @@ _DEFAULT_BEHAVIOR: dict = {
         "describe_prompt": "你是憨憨的眼睛。用户刚刚给憨憨发了一张图片，请客观、简短地描述图片内容：画面主体、场景、图片里的文字（如果有）。200 字以内，只描述，不评价，不要揣测发图人的意图。"
       }
     }
+
 
 
 
@@ -631,6 +634,39 @@ class HanhanPersonaPlugin(Star):
         if situation:
             req.system_prompt = f"{req.system_prompt}\n{_SITUATION_MARK}\n{situation}"
 
+    async def _absorb_sticker_only(self, event: AstrMessageEvent) -> bool:
+        """纯表情/无实质文本消息（图片表情、误发）：不触发 LLM 回复。
+
+        - 有活跃合并/识别缓冲：并入缓冲，等后续文本消息一起处理
+        - 无缓冲：吞掉本消息，按 sticker_only_prob 概率回一张随机表情包
+          （模拟真实回应），否则静默——表情包只是情绪助词，不值得单独回文字
+        """
+        if not self._is_private(event):
+            return False
+        has_text = any(
+            isinstance(c, Plain) and c.text.strip()
+            for c in event.message_obj.message
+        )
+        if has_text:
+            return False
+        sid = self._session_id(event)
+        if sid in self._merge_buffers or sid in self._vision_buffers:
+            return await self._merge_messages(event)  # 并入现有缓冲
+        prob = float(self.bcfg.get("reply", {}).get("sticker_only_prob", 0.4))
+        if random.random() < prob:
+            img = self.stickers.pick(sid, None)
+            if img is not None:
+                try:
+                    await event.send(MessageChain().file_image(str(ensure_sendable(img))))
+                    self.stickers.record_used(sid, img.name)
+                    self.stickers.record_sent(sid)
+                    logger.info(f"[hanhan] 纯表情消息回应表情包: {img.name}")
+                except Exception as e:
+                    logger.warning(f"[hanhan] 纯表情回应发送失败: {e}")
+        else:
+            logger.info("[hanhan] 纯表情消息已静默（情绪助词，不单独回复）")
+        return True
+
     async def _merge_messages(self, event: AstrMessageEvent) -> bool:
         """短时间多条消息合并（去抖）：同一私聊会话在窗口内连发的多条消息，
         吞掉后续消息并入缓冲区，等消息流稳定（对方输入完）后放行第一条，
@@ -670,15 +706,21 @@ class HanhanPersonaPlugin(Star):
             "count": 1,
         }
         extra_wait = float(self.bcfg.get("reply", {}).get("merge_max_wait", window))
+        max_total = float(self.bcfg.get("reply", {}).get("merge_max_total", 15.0))
         deadline = time.time() + window + extra_wait
+        hard = time.time() + max_total  # 绝对上限：连发消息再多也最多等这么久
         try:
-            while time.time() < deadline:
+            while time.time() < deadline and time.time() < hard:
                 await asyncio.sleep(0.3)
                 buf = self._merge_buffers.get(sid)
                 if buf is None:
                     break
-                if time.time() - buf["last_arrival"] >= 1.0:
-                    break  # 消息流稳定（1 秒无新消息），认为对方输入完了
+                # 有新消息：顺延稳定期（最多到绝对上限），覆盖"连发十几条"场景
+                deadline = max(deadline, buf["last_arrival"] + 1.5)
+                # 消息流稳定判定只在窗口期之后生效（至少等满 window+extra）：
+                # 否则第一条创建 1 秒后就被放行，连发消息根本合并不上
+                if time.time() >= deadline and time.time() - buf["last_arrival"] >= 1.2:
+                    break  # 窗口已满且 1.2 秒无新消息，认为对方输入完了
         finally:
             buf = self._merge_buffers.pop(sid, None)
         if not buf or buf["count"] <= 1:
@@ -709,6 +751,8 @@ class HanhanPersonaPlugin(Star):
         不触发 on_llm_request——所以在更早的 filter 阶段处理，保证 agent 无论哪轮都能看到描述。
         同时做短时间多条消息合并（详见 _merge_messages）。
         """
+        if await self._absorb_sticker_only(event):
+            return  # 纯表情消息：已回应表情包或静默，不触发 LLM
         if await self._merge_messages(event):
             return  # 已被合并等待/吞掉，不继续走 LLM 管道
         if not self.vision.enabled():
@@ -987,7 +1031,12 @@ class HanhanPersonaPlugin(Star):
                 if not 1 <= v <= 20:
                     raise ValueError
                 rp["max_reply_parts"], updated["reply.max_reply_parts"] = v, v
-            for key in ("merge_window", "merge_max_wait"):
+            if "sticker_only_prob" in data:
+                v = float(data["sticker_only_prob"])
+                if not 0 <= v <= 1:
+                    raise ValueError
+                rp["sticker_only_prob"], updated["reply.sticker_only_prob"] = v, v
+            for key in ("merge_window", "merge_max_wait", "merge_max_total"):
                 if key in data:
                     v = float(data[key])
                     if not 0 <= v <= 60:
