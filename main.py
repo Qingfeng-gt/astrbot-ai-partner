@@ -1,14 +1,15 @@
 """
 憨憨 — AstrBot 人格插件（适配 AstrBot v4.x）
 
-把 ex-skill 生成的前任人格（exes/hanhan）注入 AstrBot 的 LLM 请求，
-使 bot 以憨憨的身份、记忆和说话方式回复。
+把 /create-ex skill 生成的前任人格（浓缩为单一 md 提示词）注入
+AstrBot 的 LLM 请求，使 bot 以憨憨的身份、记忆和说话方式回复。
 
 模块结构：
 - main.py            编排层：Star 类、钩子、命令（本文件，必须位于根目录）
 - metadata.yaml      插件元数据（必须位于根目录）
 - core/              业务逻辑包：persona_loader / reply_processor /
-                     sticker_bot / memory_engine / persona_prompt.md
+                     sticker_bot / memory_engine
+- persona/           人格提示词（单一 md 提示词，可自行编辑）
 - stickers/          表情包文件夹（用户直接管理，位于根目录）
 
 行为特性：
@@ -48,9 +49,10 @@ class HanhanPersonaPlugin(Star):
     def __init__(self, context: Context, config: Optional[AstrBotConfig] = None):
         super().__init__(context)
         self.config = config or {}
-        self.persona = PersonaLoader(_PLUGIN_DIR / "core" / "persona_prompt.md")
+        self.persona = PersonaLoader(_PLUGIN_DIR / "persona" / "persona_prompt.md")
         self.persona_text = self.persona.load()
-        self.memory = MemoryEngine()
+        # 传入人格文本：其中的【时间线】表是身份阶段推算的依据（时间不写死）
+        self.memory = MemoryEngine(persona_text=self.persona_text)
         self.stickers = StickerBot(_PLUGIN_DIR / "stickers")
         # 会话粒度开关：session_id -> bool（True 为注入人格）
         self.enabled_sessions: dict[str, bool] = {}

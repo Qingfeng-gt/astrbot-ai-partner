@@ -26,15 +26,81 @@ _TOPIC_SHIFT_MIN_OVERLAP = 0.2  # 与上一条消息字符重叠低于此值视�
 _TOPIC_SHIFT_MAX_GAP = 600.0  # 距上一条消息 10 分钟内才算"突然"换话题
 _BUSY_WINDOW = 7200.0  # "去忙"状态持续 2 小时
 
+# 时间线表解析：时间节点不写死在代码里，由人格提示词的【时间线】章节驱动。
+# 支持的行格式：
+#   | 2026-08 | 描述 |                    单月
+#   | 2026-09 ~ 2026-11 | 描述 |          区间（~ 或 至）
+#   | 2026-08 之前 | 描述 |               开区间（以前/之前）
+#   | 2027-04 及以后 | 描述 |             开区间（以后/及以后/之后）
+_TIME_ROW_RE = re.compile(
+    r"^\|\s*(\d{4})-(\d{2})([^|]*?)\|\s*(.+?)\s*\|",
+    re.MULTILINE,
+)
+_OPEN_START = ("以前", "之前")
+_OPEN_END = ("以后", "及以后", "之后")
+# 人格提示词里没有时间线表时的兜底
+_DEFAULT_STAGE = "按你人格设定里的既有身份说话，身份时点不确定"
+
+
+def extract_timeline(
+    persona_text: str,
+) -> list[tuple[tuple[int, int], Optional[tuple[int, int]], str, str]]:
+    """解析人格提示词【时间线】表。
+
+    返回 [(起始年月, 结束年月或 None, 类型, 描述)]，
+    类型：month / range / before / after。
+    """
+    rows: list[tuple[tuple[int, int], Optional[tuple[int, int]], str, str]] = []
+    for m in _TIME_ROW_RE.finditer(persona_text or ""):
+        start = (int(m.group(1)), int(m.group(2)))
+        rest = m.group(3)
+        desc = m.group(4).strip()
+        end, kind = None, "month"
+        date2 = re.search(r"(\d{4})-(\d{2})", rest)
+        if date2:
+            end, kind = (int(date2.group(1)), int(date2.group(2))), "range"
+        elif any(k in rest for k in _OPEN_START):
+            kind = "before"
+        elif any(k in rest for k in _OPEN_END):
+            kind = "after"
+        rows.append((start, end, kind, desc))
+    return rows
+
+
+def _match_stage(
+    now_ym: tuple[int, int],
+    rows: list[tuple[tuple[int, int], Optional[tuple[int, int]], str, str]],
+) -> str:
+    """当前年月在时间表中匹配身份阶段；无匹配取第一行。"""
+    for start, end, kind, desc in rows:
+        if kind == "month" and now_ym == start:
+            return desc
+        if kind == "range" and start <= now_ym <= end:
+            return desc
+        if kind == "before" and now_ym < start:
+            return desc
+        if kind == "after" and now_ym >= start:
+            return desc
+    return rows[0][3] if rows else _DEFAULT_STAGE
+
 
 class MemoryEngine:
     """记录每个会话的交互时间与内容，生成情景感知提示。"""
 
-    def __init__(self):
+    def __init__(self, persona_text: str = ""):
+        # 人格提示词文本：其中的【时间线】表是身份阶段推算的唯一依据（不写死）
+        self.persona_text = persona_text or ""
         self.last_user_msg: dict[str, str] = {}
         self.last_user_time: dict[str, float] = {}
         self.last_reply_time: dict[str, float] = {}
         self.busy_until: dict[str, float] = {}
+
+    def _current_stage(self, now_dt: datetime) -> str:
+        """取当前时间与人格提示词时间表比较，得到她当下的身份阶段。"""
+        rows = extract_timeline(self.persona_text)
+        if not rows:
+            return ""
+        return _match_stage((now_dt.year, now_dt.month), rows)
 
     def on_user_message(self, session_id: str, text: str) -> None:
         self.last_user_msg[session_id] = text
@@ -71,9 +137,24 @@ class MemoryEngine:
     def build_situation(
         self, session_id: str, current: str, trimmed: bool
     ) -> str:
-        """生成【情景感知】注入文本；无值得提示的情况返回空串。"""
+        """生成【情景感知】注入文本。
+
+        始终包含：当前时间、当前阶段（按日期推算）、时段提示；
+        按需包含：时间间隔、话题突变、遗忘提示。
+        """
         now = time.time()
-        lines: list[str] = []
+        now_dt = datetime.now()
+        parts: list[str] = [f"当前时间：{now_dt.strftime('%Y-%m-%d %H:%M')}"]
+        stage = self._current_stage(now_dt)
+        if stage:
+            parts.append(f"当前阶段：{stage}")
+
+        # 时段提示：让回复贴合当下的她
+        hour = now_dt.hour
+        if hour >= 23 or hour < 5:
+            parts.append("现在是深夜——你放下防备、话多的时段，可以说心里话、发语音式的话")
+        elif hour < 18:
+            parts.append("现在是白天——你在实习/投简历/刷题，回消息是忙里偷闲")
 
         # 时间间隔：距她上次回复/上次对方消息
         gap = None
@@ -85,12 +166,12 @@ class MemoryEngine:
             gap = now - last_user
         if gap is not None:
             if gap > 12 * 3600:
-                lines.append(
+                parts.append(
                     f"- 你们隔了很久没说话了（{self._fmt_gap(gap)}）。你看到消息时淡淡的，"
                     "像刚想起来回，不会热情，不会装作热络。"
                 )
             elif gap > 2 * 3600:
-                lines.append(
+                parts.append(
                     f"- 隔了挺久才又联系（{self._fmt_gap(gap)}）。你的语气不会太热络。"
                 )
             elif (
@@ -98,29 +179,23 @@ class MemoryEngine:
                 and session_id in self.busy_until
                 and now < self.busy_until[session_id]
             ):
-                lines.append("- 你刚才说要去忙/睡了，回消息会按自己的节奏来，不着急秒回。")
+                parts.append("- 你刚才说要去忙/睡了，回消息会按自己的节奏来，不着急秒回。")
 
         # 话题突变
         if self._topic_shift(session_id, current):
-            lines.append(
+            parts.append(
                 "- 他刚才的话题跟之前完全接不上，你有点没反应过来：先表达疑惑"
                 "（“啊？”“啥？”或发个疑问/思考中的表情包），反应过来了再聊新话题。"
             )
 
         # 遗忘
         if trimmed:
-            lines.append(
+            parts.append(
                 "- 你们更早的聊天内容你已经记不太清了，不要主动提起那些细节，"
                 "被问起时模糊、不确定。"
             )
 
-        if not lines:
-            return ""
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-        return (
-            f"【情景感知】（仅本轮生效，用于判断当前气氛）：\n"
-            f"当前时间：{now_str}\n" + "\n".join(lines)
-        )
+        return "【情景感知】（仅本轮生效，用于判断当前气氛）：\n" + "\n".join(parts)
 
     @staticmethod
     def _fmt_gap(seconds: float) -> str:

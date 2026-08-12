@@ -1,13 +1,13 @@
 # astrbot_plugin_hanhan — 憨憨人格
 
-把前任"憨憨"（由 ex-skill 蒸馏生成）做成 AstrBot 人格。人格内容来自 `exes/hanhan/SKILL.md`（关系记忆 + 人物性格 + 运行规则），转写为系统提示词。
+一个自包含的 AstrBot 人格插件：把前任"憨憨"做成 bot。人格由 Claude Code 的 `/create-ex` skill（前任蒸馏）生成——该 skill 产出"关系记忆 + 人物性格 + 运行规则"的完整人格设定，本插件将其**浓缩为单一 md 提示词**（`persona/persona_prompt.md`）运行。整个项目不依赖仓库外的任何文件，克隆即用。
 
 ## 两种用法
 
 ### 方式 A：粘贴人格（任何版本都适用，推荐先试这个）
 
 1. 打开 AstrBot 后台 → **服务配置** → LLM 提供商 → **人格与情景**
-2. 把 [`persona_prompt.md`](persona_prompt.md) 的全部内容粘贴进去，保存
+2. 把 [`persona/persona_prompt.md`](persona/persona_prompt.md) 的全部内容粘贴进去，保存
 3. 重启会话生效
 
 ### 方式 B：插件自动注入（每个会话生效，可随时开关）
@@ -42,6 +42,7 @@
 - **久别**：隔 2 小时以上再联系，语气不热络；隔 12 小时以上，淡淡的、像刚想起来回消息
 - **忙碌节奏**：她说过"去忙/睡了/上课"之后 2 小时内，回复按自己的节奏，不秒回
 - **遗忘**：上下文超过 30 条自动截断更早的对话，并提示她"更早的事记不清了"——被问到旧细节会模糊、不确定
+- **时间感知**：每轮注入当前时间 + 时段提示（深夜放下防备、白天忙里偷闲）；身份阶段由函数取当前日期与**人格提示词里的【时间线】表**比较得出（时间节点不写死在代码里，改表即改推算）
 
 ## 消息支持
 
@@ -60,16 +61,18 @@ astrbot_plugin_hanhan/
 │   ├── persona_loader.py    # 人格提示词加载
 │   ├── reply_processor.py   # LLM 回复解析（分条/去句号/表情包标记）
 │   ├── sticker_bot.py       # 表情包选择（情绪匹配/同义词/防重复/限频）
-│   ├── memory_engine.py     # 情景感知（时间间隔/话题突变/遗忘/忙碌）
-│   └── persona_prompt.md    # 人格内容（可自行编辑）
+│   └── memory_engine.py     # 情景感知（时间/阶段/话题突变/遗忘/忙碌）
+├── persona/
+│   └── persona_prompt.md    # 人格提示词（单一 md，可自行编辑）
 ├── stickers/            # 表情包文件夹（用户直接管理）
 └── README.md
 ```
 
 ## 自定义
 
-- 人格内容全部在 `persona_prompt.md`，直接改，改完重启 AstrBot（或重启会话）生效
-- 想换一个前任：改 `persona_prompt.md` 的"你是谁"和"聊天规则"部分即可；`exes/{slug}/SKILL.md` 里有现成的完整材料
+- 人格内容全部在 `persona/persona_prompt.md`（单一 md 提示词，独立文件夹），直接改，改完重启 AstrBot（或重启会话）生效
+- **时间线（身份阶段）**：推算表在 `persona/persona_prompt.md` 的【时间线】章节（`| 时间段 | 身份状态 |` 格式），插件每轮读表并按当前日期匹配；改表即调整推算，**无需改代码**。支持单月、区间（`~`/`至`）、开区间（`之前`/`及以后`）
+- **换一个人格**：用 Claude Code 的 `/create-ex` skill 生成新前任的人格（该 skill 输出关系记忆 + 人物性格的完整设定），再将其浓缩为单一 md 提示词替换 `persona/persona_prompt.md`；表情包情绪词表在 `core/sticker_bot.py` 的 `EMOTION_TO_KEYWORDS` 里，可同步调整
 
 ## 兼容性说明
 
