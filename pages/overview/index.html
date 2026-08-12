@@ -212,6 +212,13 @@
           <input type="number" id="rp-max-stickers" min="1" max="10" style="width: 70px" />
         </div>
         <div class="cfg-row">
+          <label>消息合并窗口（秒）：同会话连发多条时等对方输入完再整合回复（0=关闭）</label>
+          <input type="number" id="rp-merge-window" min="0" max="60" style="width: 70px" />
+          <span class="muted">秒 + 额外等待</span>
+          <input type="number" id="rp-merge-extra" min="0" max="60" style="width: 70px" />
+          <span class="muted">秒</span>
+        </div>
+        <div class="cfg-row">
           <label>补发概率：LLM 没标表情包时按此概率推断情绪补一张</label>
           <input type="range" id="m-boost" min="0" max="100" step="5" style="flex:1" />
           <span class="muted" id="m-boost-val" style="min-width: 44px"></span>
@@ -479,6 +486,8 @@
           setPair("rp-busy-min", "rp-busy-max", rp.busy_delay);
           if (rp.max_delay != null) $("rp-max-delay").value = rp.max_delay;
           if (rp.max_stickers_per_reply != null) $("rp-max-stickers").value = rp.max_stickers_per_reply;
+          if (rp.merge_window != null) $("rp-merge-window").value = rp.merge_window;
+          if (rp.merge_max_wait != null) $("rp-merge-extra").value = rp.merge_max_wait;
           $("m-boost").value = Math.round((rp.boost_prob != null ? rp.boost_prob : st.boost_prob) * 100);
           $("m-boost-val").textContent = $("m-boost").value + "%";
           if (sk.rate_max != null) $("m-rate-max").value = sk.rate_max;
@@ -517,6 +526,8 @@
                 busy_delay: [Number($("rp-busy-min").value), Number($("rp-busy-max").value)],
                 max_delay: Number($("rp-max-delay").value),
                 max_stickers_per_reply: Number($("rp-max-stickers").value),
+                merge_window: Number($("rp-merge-window").value),
+                merge_max_wait: Number($("rp-merge-extra").value),
                 boost_prob: Number($("m-boost").value) / 100,
                 rate_max: Number($("m-rate-max").value),
                 rate_window: Number($("m-rate-window").value),

@@ -20,7 +20,7 @@ desc: |
 
   ## 图片识别（可选）
   在插件配置里填入百炼 API Key 后，用户发图片时憨憨能"看到"图片内容并自然回应（识别走百炼多模态，对话仍走原模型）。配置项见插件目录下的 _conf_schema.json。
-version: 1.0.26
+version: 1.0.27
 author: Qingfeng-gt
 repo: https://github.com/Qingfeng-gt/astrbot-ai-partner
 tags:

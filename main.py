@@ -24,6 +24,7 @@ AstrBot 的 LLM 请求，使 bot 以憨憨的身份、记忆和说话方式回�
 import asyncio
 import json
 import random
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -56,7 +57,7 @@ _SITUATION_MARK = "<!-- hanhan-situation -->"
 _PLUGIN_DIR = Path(__file__).parent
 # 插件名/版本（Web API 路由前缀与页面展示用，版本与 metadata.yaml 同步）
 _PLUGIN_NAME = "astrbot_plugin_hanhan"
-_PLUGIN_VERSION = "1.0.26"
+_PLUGIN_VERSION = "1.0.27"
 
 
 def _fmt_window(window: tuple[int, int]) -> str:
@@ -136,7 +137,10 @@ _DEFAULT_BEHAVIOR: dict = {
         ],
         "max_delay": 120,
         "max_stickers_per_reply": 1,
-        "boost_prob": 0.35
+        "boost_prob": 0.35,
+        "merge_window": 2.5,
+        "merge_max_wait": 2.5,
+        "merge_only_private": True
       },
       "sticker": {
         "avoid_repeat": 2,
@@ -395,6 +399,7 @@ _DEFAULT_BEHAVIOR: dict = {
     }
 
 
+
 class HanhanPersonaPlugin(Star):
     def __init__(self, context: Context, config: Optional[AstrBotConfig] = None):
         super().__init__(context)
@@ -449,6 +454,8 @@ class HanhanPersonaPlugin(Star):
         )
         # 会话粒度开关：session_id -> bool（True 为注入人格）
         self.enabled_sessions: dict[str, bool] = {}
+        # 消息合并缓冲区：session_id -> {components, last_arrival, count}
+        self._merge_buffers: dict[str, dict] = {}
         # 插件页面（WebUI pages/ 目录）调用的接口：路由必须带插件名前缀
         self.context.register_web_api(
             f"/{_PLUGIN_NAME}/status",
@@ -648,6 +655,68 @@ class HanhanPersonaPlugin(Star):
         if situation:
             req.system_prompt = f"{req.system_prompt}\n{_SITUATION_MARK}\n{situation}"
 
+    async def _merge_messages(self, event: AstrMessageEvent) -> bool:
+        """短时间多条消息合并（去抖）：同一私聊会话在窗口内连发的多条消息，
+        吞掉后续消息并入缓冲区，等消息流稳定（对方输入完）后放行第一条，
+        让 LLM 整合回复；窗口超时仍未发完则先回复已收到的部分。
+
+        返回 True 表示本消息已被吞掉/正在等待合并（不再走 LLM 管道）。
+        参数：reply.merge_window（窗口秒，0=关闭）、merge_max_wait（额外等待上限）、
+        merge_only_private（仅私聊合并）。
+        """
+        if not self._is_private(event):
+            return False  # 群聊不合并（多人消息不能混淆成一条）
+        if not self.bcfg.get("reply", {}).get("merge_only_private", True):
+            return False
+        window = float(self.bcfg.get("reply", {}).get("merge_window", 2.5))
+        if window <= 0:
+            return False
+        sid = self._session_id(event)
+        buf = self._merge_buffers.get(sid)
+        if buf is not None:
+            # 后续消息：并入缓冲区，吞掉本消息（不触发独立回复）
+            buf["components"].append(list(event.message_obj.message))
+            buf["last_arrival"] = time.time()
+            buf["count"] += 1
+            logger.info(f"[hanhan] 消息合并：{sid} 第 {buf['count']} 条并入，等待消息流稳定")
+            return True
+        # 第一条消息：建立缓冲区，等待窗口（消息流持续则顺延，最多窗口+额外等待）
+        self._merge_buffers[sid] = {
+            "components": [list(event.message_obj.message)],
+            "last_arrival": time.time(),
+            "count": 1,
+        }
+        extra_wait = float(self.bcfg.get("reply", {}).get("merge_max_wait", window))
+        deadline = time.time() + window + extra_wait
+        try:
+            while time.time() < deadline:
+                await asyncio.sleep(0.3)
+                buf = self._merge_buffers.get(sid)
+                if buf is None:
+                    break
+                if time.time() - buf["last_arrival"] >= 1.0:
+                    break  # 消息流稳定（1 秒无新消息），认为对方输入完了
+        finally:
+            buf = self._merge_buffers.pop(sid, None)
+        if not buf or buf["count"] <= 1:
+            return False  # 只有一条消息：正常放行
+        # 合并：后续消息的文本并入第一条（Plain 拼接），富媒体组件追加到消息链
+        extra_texts = []
+        for comps in buf["components"][1:]:
+            for comp in comps:
+                if isinstance(comp, Plain):
+                    extra_texts.append(comp.text)
+                else:
+                    event.message_obj.message.append(comp)
+        if extra_texts:
+            joined = "\n".join(t for t in extra_texts if t)
+            if joined:
+                event.message_obj.message.append(Plain(joined))
+                event.message_str = f"{event.message_str}\n{joined}"
+                event.message_obj.message_str = f"{event.message_obj.message_str}\n{joined}"
+        logger.info(f"[hanhan] 消息合并完成：{sid} 合并 {buf['count']} 条为一条，整合回复")
+        return False
+
     @regex(r"[\s\S]*")
     async def capture_vision(self, event: AstrMessageEvent) -> None:
         """消息过滤器阶段（所有消息都经过，包括 agent 的 follow-up 消息）：
@@ -655,7 +724,10 @@ class HanhanPersonaPlugin(Star):
 
         v4.2x 的 agent 模式下图片消息可能作为 follow-up 并入进行中的 agent run，
         不触发 on_llm_request——所以在更早的 filter 阶段处理，保证 agent 无论哪轮都能看到描述。
+        同时做短时间多条消息合并（详见 _merge_messages）。
         """
+        if await self._merge_messages(event):
+            return  # 已被合并等待/吞掉，不继续走 LLM 管道
         if not self.vision.enabled():
             return
         if self._private_only() and not self._is_private(event):
@@ -734,6 +806,11 @@ class HanhanPersonaPlugin(Star):
                 parts.append(("img", emotion))
                 logger.info(f"[hanhan] 补发表情包（文本情绪推断: {emotion}）")
 
+        # 先停掉"正在输入"指示再停顿——否则停顿期间用户一直看到"输入中"却没内容
+        try:
+            await event.stop_typing()
+        except Exception:
+            pass
         # 模拟真人节奏再回复：基础打字延迟 + 间隔越久越慢 + 说过要去忙则"忙完回来"
         await self._human_pause(sid)
 
@@ -893,6 +970,12 @@ class HanhanPersonaPlugin(Star):
                 if not 0 <= v <= 1:
                     raise ValueError
                 rp["boost_prob"], updated["reply.boost_prob"] = v, v
+            for key in ("merge_window", "merge_max_wait"):
+                if key in data:
+                    v = float(data[key])
+                    if not 0 <= v <= 60:
+                        raise ValueError
+                    rp[key], updated[f"reply.{key}"] = v, v
             # 表情包限频
             st = cfg.setdefault("sticker", {})
             if "rate_max" in data:
