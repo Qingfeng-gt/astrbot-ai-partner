@@ -91,9 +91,12 @@ TEXT_EMOTION_RULES: list[tuple[str, str]] = [
 ]
 
 
-def infer_emotion(text: str) -> Optional[str]:
-    """从回复文本推断情绪词（用于 LLM 没标表情包时补发）；无命中返回 None。"""
-    for pattern, emotion in TEXT_EMOTION_RULES:
+def infer_emotion(text: str, rules: Optional[list] = None) -> Optional[str]:
+    """从回复文本推断情绪词（用于 LLM 没标表情包时补发）；无命中返回 None。
+
+    rules 可传入自定义规则列表 [(正则, 情绪词), ...]，缺省用模块级 TEXT_EMOTION_RULES。
+    """
+    for pattern, emotion in rules or TEXT_EMOTION_RULES:
         if re.search(pattern, text):
             return emotion
     return None
@@ -115,12 +118,24 @@ class StickerBot:
         rate_max: int = 3,
         boost_prob: float = 0.3,
         tags: Optional[dict] = None,
+        emotion_keywords: Optional[dict] = None,
+        text_rules: Optional[list] = None,
     ):
         self.sticker_dir = Path(sticker_dir)
         self.avoid_repeat = avoid_repeat
         self.rate_window = rate_window
         self.rate_max = rate_max
         self.boost_prob = boost_prob
+        # 情绪词 → 文件名关键词表（可整体替换以适配不同人格）
+        self.emotion_keywords: dict[str, list[str]] = (
+            dict(emotion_keywords) if emotion_keywords else dict(EMOTION_TO_KEYWORDS)
+        )
+        # 文本 → 情绪推断规则（正则列表，可整体替换）
+        self.text_rules: list[tuple[str, str]] = (
+            [(str(p), str(e)) for p, e in text_rules]
+            if text_rules
+            else list(TEXT_EMOTION_RULES)
+        )
         # 手写标签：文件名(小写) -> 标签列表
         self.tags: dict[str, list[str]] = {
             str(k).lower(): [str(t).strip() for t in v if str(t).strip()]
@@ -144,7 +159,7 @@ class StickerBot:
         stem = p.stem.lower()
         return [
             emo
-            for emo, kws in EMOTION_TO_KEYWORDS.items()
+            for emo, kws in self.emotion_keywords.items()
             if emo.lower() in stem or any(kw in stem for kw in kws)
         ]
 
@@ -195,7 +210,7 @@ class StickerBot:
                 top = [p for s, p in scored if s == best]
                 return random.choice(top)
             # 2) 无命中：同义词关键词兜底（现有逻辑）
-            for alt in EMOTION_TO_KEYWORDS.get(kw, []):
+            for alt in self.emotion_keywords.get(kw, []):
                 matched = self._candidates(pool, alt)
                 if matched:
                     return random.choice(matched)

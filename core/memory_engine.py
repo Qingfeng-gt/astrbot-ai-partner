@@ -87,9 +87,21 @@ def _match_stage(
 class MemoryEngine:
     """记录每个会话的交互时间与内容，生成情景感知提示。"""
 
-    def __init__(self, persona_text: str = ""):
+    def __init__(
+        self,
+        persona_text: str = "",
+        max_contexts: int = _MAX_CONTEXTS,
+        topic_shift_min_overlap: float = _TOPIC_SHIFT_MIN_OVERLAP,
+        topic_shift_max_gap: float = _TOPIC_SHIFT_MAX_GAP,
+        busy_window: float = _BUSY_WINDOW,
+    ):
         # 人格提示词文本：其中的【时间线】表是身份阶段推算的唯一依据（不写死）
         self.persona_text = persona_text or ""
+        # 表现参数（behavior_config.json memory 段覆盖）：遗忘/话题突变/去忙窗口
+        self.max_contexts = int(max_contexts)
+        self.topic_shift_min_overlap = float(topic_shift_min_overlap)
+        self.topic_shift_max_gap = float(topic_shift_max_gap)
+        self.busy_window = float(busy_window)
         self.last_user_msg: dict[str, str] = {}
         self.last_user_time: dict[str, float] = {}
         self.last_reply_time: dict[str, float] = {}
@@ -112,7 +124,7 @@ class MemoryEngine:
         下一轮回复节奏变慢（"忙完回来"）。"""
         self.last_reply_time[session_id] = time.time()
         if _BUSY_RE.search(text) and not _INVITE_RE.search(text):
-            self.busy_until[session_id] = time.time() + _BUSY_WINDOW
+            self.busy_until[session_id] = time.time() + self.busy_window
             self.busy_pending[session_id] = True
 
     def take_busy_pause(self, session_id: str) -> bool:
@@ -138,9 +150,9 @@ class MemoryEngine:
 
     def trim_contexts(self, contexts: list) -> tuple[list, bool]:
         """截断过长上下文（遗忘机制）；返回 (截断后列表, 是否发生截断)。"""
-        if len(contexts) <= _MAX_CONTEXTS:
+        if len(contexts) <= self.max_contexts:
             return contexts, False
-        return contexts[-_MAX_CONTEXTS:], True
+        return contexts[-self.max_contexts:], True
 
     def _topic_shift(self, session_id: str, current: str) -> bool:
         """判断用户是否突然换了话题：与上一条消息重叠低且在短时间内。"""
@@ -155,7 +167,7 @@ class MemoryEngine:
         if not a or not b:
             return False
         overlap = len(a & b) / min(len(a), len(b))
-        return overlap < _TOPIC_SHIFT_MIN_OVERLAP
+        return overlap < self.topic_shift_min_overlap
 
     def build_situation(
         self, session_id: str, current: str, trimmed: bool

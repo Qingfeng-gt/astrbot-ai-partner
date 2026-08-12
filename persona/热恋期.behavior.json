@@ -1,0 +1,26 @@
+{
+  "private_only": true,
+  "reply": {
+    "base_delay": [0.5, 1.5],
+    "busy_delay": [5, 15],
+    "gap_extra_30m": [0, 1],
+    "gap_extra_2h": [1, 2],
+    "gap_extra_12h": [2, 4],
+    "max_delay": 30,
+    "max_stickers_per_reply": 2,
+    "boost_prob": 0.6
+  },
+  "sticker": {
+    "avoid_repeat": 3,
+    "rate_max": 8,
+    "rate_window": 600
+  },
+  "proactive": {
+    "night_prob": 0.7,
+    "day_prob": 0.5,
+    "night_window": [1260, 1500],
+    "day_window": [480, 1440],
+    "loop_interval": 30,
+    "max_retries": 3
+  }
+}

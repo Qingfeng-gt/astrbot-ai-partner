@@ -30,6 +30,7 @@ NIGHT_PROB = 0.3  # 每晚主动联系的概率（低频，回避型人设不会
 DAY_PROB = 0.1  # 每天白天主动分享的概率
 LOOP_INTERVAL = 60  # 调度检查间隔（秒）
 MAX_SEND_RETRIES = 3  # 单轮主动消息最多重试次数，超过后放弃（避免坏目标每 60s 刷日志/重复烧 LLM）
+# 以上均为默认值；可通过 behavior_config.json 的 proactive 段覆盖（见 main.py）
 
 # 兜底句（LLM 生成失败时使用），保持人格安全
 CANNED = {
@@ -80,11 +81,24 @@ class ProactiveSender:
         persona_text: str,
         sticker_bot: StickerBot,
         state_file: Path,
+        night_window: tuple = NIGHT_WINDOW,
+        day_window: tuple = DAY_WINDOW,
+        night_prob: float = NIGHT_PROB,
+        day_prob: float = DAY_PROB,
+        loop_interval: int = LOOP_INTERVAL,
+        max_retries: int = MAX_SEND_RETRIES,
     ):
         self.context = context
         self.persona_text = persona_text or ""
         self.stickers = sticker_bot
         self.state_file = Path(state_file)
+        # 可配置的表现参数（behavior_config.json proactive 段覆盖）
+        self.night_window = tuple(int(x) for x in night_window)
+        self.day_window = tuple(int(x) for x in day_window)
+        self.night_prob = float(night_prob)
+        self.day_prob = float(day_prob)
+        self.loop_interval = int(loop_interval)
+        self.max_retries = int(max_retries)
         self.state: dict = {
             "targets": [],
             "active": True,
@@ -228,8 +242,8 @@ class ProactiveSender:
     def _plan_day(self, date_str: str, cur: int) -> None:
         """为新的一天生成随机调度计划（按概率决定是否安排，只选窗口内的未来时刻）。"""
         self.state["plan_date"] = date_str
-        self.state["night_minute"] = _pick_future_minute(NIGHT_WINDOW, cur, NIGHT_PROB)
-        self.state["day_minute"] = _pick_future_minute(DAY_WINDOW, cur, DAY_PROB)
+        self.state["night_minute"] = _pick_future_minute(self.night_window, cur, self.night_prob)
+        self.state["day_minute"] = _pick_future_minute(self.day_window, cur, self.day_prob)
         self.state["sent_night"] = False
         self.state["sent_day"] = False
         self._save_state()
@@ -243,7 +257,7 @@ class ProactiveSender:
             try:
                 now = datetime.now()
                 if not self.state["active"] or not self.state["targets"]:
-                    await asyncio.sleep(LOOP_INTERVAL)
+                    await asyncio.sleep(self.loop_interval)
                     continue
                 today = now.strftime("%Y-%m-%d")
                 cur = _cur_minute(now)
@@ -265,7 +279,7 @@ class ProactiveSender:
                 raise
             except BaseException:
                 logger.error(f"[hanhan] 主动调度循环异常: ", exc_info=True)
-            await asyncio.sleep(LOOP_INTERVAL)
+            await asyncio.sleep(self.loop_interval)
 
     # ---------- 发送 ----------
 
@@ -278,7 +292,7 @@ class ProactiveSender:
         else:
             failures = self.state.get(f"last_{kind}_failures", 0) + 1
             self.state[f"last_{kind}_failures"] = failures
-            if failures >= MAX_SEND_RETRIES:
+            if failures >= self.max_retries:
                 self.state[f"sent_{kind}"] = True  # 放弃本轮，次日再重新计划
                 logger.error(
                     f"[hanhan] 主动消息({kind})连续 {failures} 次发送失败，已放弃本轮重试"

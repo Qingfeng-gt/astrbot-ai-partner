@@ -42,10 +42,14 @@ class VisionEngine:
         endpoint: str = "",
         model: str = "",
         key_file: str = "",
+        max_images: int = _MAX_IMAGES,
+        timeout: float = _TIMEOUT,
+        describe_prompt: str = _DESCRIBE_PROMPT,
     ):
         """key 读取优先级：环境变量 > 插件配置 > 插件目录下的 key 文件（bailian.key）。
 
         key 文件内容为纯文本 key（自动 strip），不进代码/仓库。
+        max_images/timeout/describe_prompt 可由 behavior_config.json vision 段覆盖。
         """
         file_key = ""
         if key_file:
@@ -58,6 +62,9 @@ class VisionEngine:
         ).strip()
         self.endpoint = (endpoint or _DEFAULT_ENDPOINT).strip().rstrip("/")
         self.model = (model or "").strip()
+        self.max_images = int(max_images)
+        self.timeout = float(timeout)
+        self.describe_prompt = str(describe_prompt)
 
     def enabled(self) -> bool:
         """是否已配置（有 key 即启用）。"""
@@ -94,7 +101,7 @@ class VisionEngine:
     async def describe(self, images: list) -> str:
         """识别一组图片，返回简短描述；任何失败都返回空串（不阻塞）。"""
         urls = []
-        for comp in images[: _MAX_IMAGES]:
+        for comp in images[: self.max_images]:
             u = self._image_data_url(comp)
             if u:
                 urls.append(u)
@@ -108,7 +115,7 @@ class VisionEngine:
                     "content": [
                         {"type": "image_url", "image_url": {"url": u}} for u in urls
                     ]
-                    + [{"type": "text", "text": _DESCRIBE_PROMPT}],
+                    + [{"type": "text", "text": self.describe_prompt}],
                 }
             ],
             "max_tokens": 300,
@@ -134,10 +141,9 @@ class VisionEngine:
             logger.warning(f"[hanhan] 图片识别失败（本轮按没看到图处理）: {e}")
             return ""
 
-    @staticmethod
-    def _post(req: urllib.request.Request) -> str:
+    def _post(self, req: urllib.request.Request) -> str:
         try:
-            with urllib.request.urlopen(req, timeout=_TIMEOUT) as r:
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
                 return r.read().decode("utf-8", "ignore")
         except urllib.error.HTTPError as e:
             # 把响应体带出来，便于定位 401/404/模型名等问题

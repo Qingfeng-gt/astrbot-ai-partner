@@ -73,9 +73,19 @@ astrbot_plugin_hanhan/
 └── README.md
 ```
 
+## 多人格模板（v1.0.26+）
+
+- `persona/` 目录下每个 `*.md` 是一个人格模板（如 `persona_prompt.md`=憨憨、`热恋期.md`=示例），
+  页面「人格模板」卡可切换（切换后需重载插件）
+- 每个模板可带同名 `*.behavior.json` 推荐参数（如 `热恋期.behavior.json`：粘人=秒回+高主动概率+高频表情包），
+  没有则继承全局默认
+- 页面「表现参数」卡可微调：回复节奏（延迟/表情包上限/补发概率）、表情包限频、主动消息概率与窗口，
+  修改写入 `behavior_config.json`（用户微调层），切换模板后微调仍保留
+- 换人格 = 新建 `persona/<名>.md`（可选 `<名>.behavior.json`）+ 页面切换，不改代码
+
 ## 自定义
 
-- 人格内容全部在 `persona/persona_prompt.md`（单一 md 提示词，独立文件夹），直接改，改完重启 AstrBot（或重启会话）生效
+- 人格内容全部在 `persona/` 目录（多个模板，单一 md 提示词），直接改，改完重载插件生效
 - **时间线（身份阶段）**：推算表在 `persona/persona_prompt.md` 的【时间线】章节（`| 时间段 | 身份状态 |` 格式），插件每轮读表并按当前日期匹配；改表即调整推算，**无需改代码**。支持单月、区间（`~`/`至`）、开区间（`之前`/`及以后`）
 - **换一个人格**：用 Claude Code 的 `/create-ex` skill 生成新前任的人格（该 skill 输出关系记忆 + 人物性格的完整设定），再将其浓缩为单一 md 提示词替换 `persona/persona_prompt.md`；表情包情绪词表在 `core/sticker_bot.py` 的 `EMOTION_TO_KEYWORDS` 里，可同步调整
 

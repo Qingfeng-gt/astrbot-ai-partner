@@ -147,6 +147,20 @@
       </div>
 
       <div class="card">
+        <h2>人格模板</h2>
+        <div class="cfg-row">
+          <label>当前人格</label>
+          <select id="p-persona" style="flex:1; max-width: 260px"></select>
+          <button id="p-persona-save" disabled>切换</button>
+        </div>
+        <p class="muted" style="margin-top: 8px">
+          人格 = <code>persona/&lt;名&gt;.md</code> 提示词 + 同名 <code>.behavior.json</code>
+          推荐参数（可选）。切换后<strong>需重载插件</strong>生效；憨憨是内置模板，可在
+          <code>persona/</code> 目录自行添加人格（如"热恋期"示例：粘人/秒回/高频表情包）。
+        </p>
+      </div>
+
+      <div class="card">
         <h2>概率事件</h2>
         <table>
           <tr><th>深夜主动概率</th><td id="p-night-prob">—</td></tr>
@@ -162,10 +176,10 @@
       </div>
 
       <div class="card">
-        <h2>表情包管理</h2>
+        <h2>表现参数</h2>
         <div class="grid">
           <div class="stat">
-            <div class="label">总数</div>
+            <div class="label">表情包总数</div>
             <div class="value accent" id="m-count">—</div>
           </div>
           <div class="stat">
@@ -176,26 +190,78 @@
         <p class="muted" style="margin-top: 10px">标签分布（文件名自动推断 + 手写配置）</p>
         <div id="m-tags" style="margin-top: 6px">—</div>
 
+        <h3 style="margin-top: 14px; font-size: 13px; color: var(--muted)">回复节奏</h3>
         <div class="cfg-row">
-          <label>补发概率：LLM 没标表情包时，按这个概率从回复文本推断情绪补一张</label>
+          <label>基础回复延迟（秒）：min ~ max</label>
+          <input type="number" id="rp-base-min" min="0" max="600" style="width: 70px" />
+          <span class="muted">~</span>
+          <input type="number" id="rp-base-max" min="0" max="600" style="width: 70px" />
+        </div>
+        <div class="cfg-row">
+          <label>她说去忙后的回复延迟（秒）</label>
+          <input type="number" id="rp-busy-min" min="0" max="3600" style="width: 70px" />
+          <span class="muted">~</span>
+          <input type="number" id="rp-busy-max" min="0" max="3600" style="width: 70px" />
+        </div>
+        <div class="cfg-row">
+          <label>总延迟封顶（秒）</label>
+          <input type="number" id="rp-max-delay" min="1" max="3600" style="width: 90px" />
+        </div>
+        <div class="cfg-row">
+          <label>每轮表情包上限（张）</label>
+          <input type="number" id="rp-max-stickers" min="1" max="10" style="width: 70px" />
+        </div>
+        <div class="cfg-row">
+          <label>补发概率：LLM 没标表情包时按此概率推断情绪补一张</label>
           <input type="range" id="m-boost" min="0" max="100" step="5" style="flex:1" />
           <span class="muted" id="m-boost-val" style="min-width: 44px"></span>
         </div>
+
+        <h3 style="margin-top: 14px; font-size: 13px; color: var(--muted)">表情包限频</h3>
         <div class="cfg-row">
-          <label>限频：窗口（秒）内最多张数，防止刷屏</label>
+          <label>窗口（秒）内最多张数 / 最近不重复张数</label>
           <input type="number" id="m-rate-max" min="1" max="20" style="width: 70px" />
           <span class="muted">张 /</span>
           <input type="number" id="m-rate-window" min="30" max="86400" style="width: 90px" />
-          <span class="muted">秒</span>
+          <span class="muted">秒 /</span>
+          <input type="number" id="m-avoid-repeat" min="0" max="10" style="width: 70px" />
+          <span class="muted">张</span>
         </div>
+
+        <h3 style="margin-top: 14px; font-size: 13px; color: var(--muted)">主动消息</h3>
+        <div class="cfg-row">
+          <label>深夜主动概率（每晚）</label>
+          <input type="range" id="pa-night-prob" min="0" max="100" step="5" style="flex:1" />
+          <span class="muted" id="pa-night-prob-val" style="min-width: 44px"></span>
+        </div>
+        <div class="cfg-row">
+          <label>白天主动概率（每天）</label>
+          <input type="range" id="pa-day-prob" min="0" max="100" step="5" style="flex:1" />
+          <span class="muted" id="pa-day-prob-val" style="min-width: 44px"></span>
+        </div>
+        <div class="cfg-row">
+          <label>深夜窗口（起 ~ 止，跨天自动处理）</label>
+          <input type="time" id="pa-night-lo" style="width: 100px" />
+          <span class="muted">~</span>
+          <input type="time" id="pa-night-hi" style="width: 100px" />
+        </div>
+        <div class="cfg-row">
+          <label>白天窗口（起 ~ 止）</label>
+          <input type="time" id="pa-day-lo" style="width: 100px" />
+          <span class="muted">~</span>
+          <input type="time" id="pa-day-hi" style="width: 100px" />
+        </div>
+
         <div style="margin-top: 14px">
           <button id="m-save" disabled>保存参数</button>
           <span class="muted" id="m-save-msg" style="margin-left: 8px"></span>
+          <span class="muted" id="m-save-tip"></span>
         </div>
         <p class="muted" style="margin-top: 10px">
-          多标签匹配：编辑插件目录下 <code>sticker_config.json</code> 的
-          <code>tags</code>（文件名 → 标签列表，可多个），按命中标签数选图；
-          文件名含情绪词的会自动打标（如 catbug-开心.webp、blobcatcry.png）。
+          全部参数存 <code>behavior_config.json</code>；人格模板可自带同名
+          <code>.behavior.json</code> 推荐参数（页面修改会覆盖模板推荐值）。
+          表情包多标签：编辑 <code>behavior_config.json</code> 的
+          <code>sticker.tags</code>（文件名 → 标签列表），按命中标签数选图。
         </p>
       </div>
 
@@ -257,6 +323,24 @@
 
       function setLoading(text) {
         $("loading").textContent = text;
+      }
+
+      // 绝对分钟 <-> HH:MM（跨天窗口：止 <= 起 时自动 +1440）
+      function minToTime(m) {
+        m = ((m % 1440) + 1440) % 1440;
+        return String(Math.floor(m / 60)).padStart(2, "0") + ":" + String(m % 60).padStart(2, "0");
+      }
+      function timeToMin(v) {
+        const [h, m] = v.split(":").map(Number);
+        return h * 60 + m;
+      }
+      function windowToInputs(win) {
+        const lo = win[0] % 1440, hi = win[1] % 1440;
+        return { lo: minToTime(lo), hi: minToTime(hi) };
+      }
+      function inputsToWindow(lo, hi) {
+        const a = timeToMin(lo), b = timeToMin(hi);
+        return [a, b <= a ? b + 1440 : b];  // 跨天窗口
       }
 
       // 同源直连兜底：iframe 与 dashboard 同源（页面路径为相对 URL），
@@ -337,6 +421,28 @@
           $("loading").hidden = true;
           $("loading").textContent = "";
 
+          // 人格模板
+          const psel = $("p-persona");
+          psel.innerHTML = "";
+          (s.persona.templates || []).forEach((t) => {
+            const opt = document.createElement("option");
+            opt.value = t;
+            opt.textContent = t;
+            psel.appendChild(opt);
+          });
+          psel.value = s.persona.active || "";
+          $("p-persona-save").disabled = false;
+          $("p-persona-save").addEventListener("click", async () => {
+            $("p-persona-save").disabled = true;
+            try {
+              await apiPost(bridge, "config", { persona: psel.value });
+              $("p-persona-save").textContent = "已保存，请重载插件";
+            } catch (e) {
+              $("p-persona-save").textContent = "保存失败";
+              alert("切换失败：" + (e && e.message ? e.message : e));
+            }
+          });
+
           // 概率事件
           $("p-night-prob").textContent = `${Math.round(s.proactive.night_prob * 100)}%（每晚）`;
           $("p-day-prob").textContent = `${Math.round(s.proactive.day_prob * 100)}%（每天）`;
@@ -359,24 +465,69 @@
             .map(([t, n]) => `<span class="tag">${t} ×${n}</span>`)
             .join("");
           $("m-tags").innerHTML = tagsHtml || "（无标签数据）";
-          $("m-boost").value = Math.round(st.boost_prob * 100);
-          $("m-boost-val").textContent = Math.round(st.boost_prob * 100) + "%";
-          $("m-rate-max").value = st.rate_max;
-          $("m-rate-window").value = st.rate_window;
+          // 表现参数填充
+          const rp = (s.persona.params && s.persona.params.reply) || {};
+          const pa = (s.persona.params && s.persona.params.proactive) || {};
+          const sk = (s.persona.params && s.persona.params.sticker) || {};
+          const setPair = (loId, hiId, arr) => {
+            if (Array.isArray(arr) && arr.length === 2) {
+              $(loId).value = arr[0];
+              $(hiId).value = arr[1];
+            }
+          };
+          setPair("rp-base-min", "rp-base-max", rp.base_delay);
+          setPair("rp-busy-min", "rp-busy-max", rp.busy_delay);
+          if (rp.max_delay != null) $("rp-max-delay").value = rp.max_delay;
+          if (rp.max_stickers_per_reply != null) $("rp-max-stickers").value = rp.max_stickers_per_reply;
+          $("m-boost").value = Math.round((rp.boost_prob != null ? rp.boost_prob : st.boost_prob) * 100);
+          $("m-boost-val").textContent = $("m-boost").value + "%";
+          if (sk.rate_max != null) $("m-rate-max").value = sk.rate_max;
+          if (sk.rate_window != null) $("m-rate-window").value = sk.rate_window;
+          if (sk.avoid_repeat != null) $("m-avoid-repeat").value = sk.avoid_repeat;
+          $("pa-night-prob").value = Math.round((pa.night_prob != null ? pa.night_prob : s.proactive.night_prob) * 100);
+          $("pa-night-prob-val").textContent = $("pa-night-prob").value + "%";
+          $("pa-day-prob").value = Math.round((pa.day_prob != null ? pa.day_prob : s.proactive.day_prob) * 100);
+          $("pa-day-prob-val").textContent = $("pa-day-prob").value + "%";
+          const nw = windowToInputs(pa.night_window || (s.proactive.night_window ? s.proactive.night_window.split("~").map(x => {
+            const t = x.trim().split(":");
+            return (+t[0] % 24) * 60 + +t[1];
+          }) : [1380, 1530]));
+          $("pa-night-lo").value = nw.lo;
+          $("pa-night-hi").value = nw.hi;
+          const dw = windowToInputs(pa.day_window || [720, 1320]);
+          $("pa-day-lo").value = dw.lo;
+          $("pa-day-hi").value = dw.hi;
+
           $("m-save").disabled = false;
           $("m-boost").addEventListener("input", () => {
             $("m-boost-val").textContent = $("m-boost").value + "%";
+          });
+          $("pa-night-prob").addEventListener("input", () => {
+            $("pa-night-prob-val").textContent = $("pa-night-prob").value + "%";
+          });
+          $("pa-day-prob").addEventListener("input", () => {
+            $("pa-day-prob-val").textContent = $("pa-day-prob").value + "%";
           });
           $("m-save").addEventListener("click", async () => {
             $("m-save").disabled = true;
             $("m-save-msg").textContent = "保存中…";
             try {
               const res = await apiPost(bridge, "config", {
+                base_delay: [Number($("rp-base-min").value), Number($("rp-base-max").value)],
+                busy_delay: [Number($("rp-busy-min").value), Number($("rp-busy-max").value)],
+                max_delay: Number($("rp-max-delay").value),
+                max_stickers_per_reply: Number($("rp-max-stickers").value),
                 boost_prob: Number($("m-boost").value) / 100,
                 rate_max: Number($("m-rate-max").value),
                 rate_window: Number($("m-rate-window").value),
+                avoid_repeat: Number($("m-avoid-repeat").value),
+                night_prob: Number($("pa-night-prob").value) / 100,
+                day_prob: Number($("pa-day-prob").value) / 100,
+                night_window: inputsToWindow($("pa-night-lo").value, $("pa-night-hi").value),
+                day_window: inputsToWindow($("pa-day-lo").value, $("pa-day-hi").value),
               });
               $("m-save-msg").textContent = "已保存 ✓";
+              $("m-save-tip").textContent = "（回复节奏立即生效；主动消息窗口/概率次日计划生效）";
             } catch (e) {
               $("m-save-msg").textContent = "保存失败：" + (e && e.message ? e.message : e);
             } finally {

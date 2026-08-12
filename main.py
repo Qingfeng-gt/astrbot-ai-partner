@@ -56,34 +56,373 @@ _SITUATION_MARK = "<!-- hanhan-situation -->"
 _PLUGIN_DIR = Path(__file__).parent
 # 插件名/版本（Web API 路由前缀与页面展示用，版本与 metadata.yaml 同步）
 _PLUGIN_NAME = "astrbot_plugin_hanhan"
-_PLUGIN_VERSION = "1.0.25"
+_PLUGIN_VERSION = "1.0.26"
 
 
 def _fmt_window(window: tuple[int, int]) -> str:
     """把跨天绝对分钟窗口格式化为 '23:00 ~ 01:30' 样式。"""
     lo, hi = window
     return f"{lo % (24 * 60) // 60:02d}:{lo % 60:02d} ~ {hi % (24 * 60) // 60:02d}:{hi % 60:02d}"
-# 人格是否仅在私聊会话生效（前任人格在群里不合适，默认 True）
-_PERSONA_ONLY_PRIVATE = True
+
+
+def _deep_merge(base: dict, *overrides: dict) -> dict:
+    """深合并多个 dict（后者覆盖前者，嵌套 dict 递归合并，其余类型直接覆盖）。"""
+    result = json.loads(json.dumps(base))
+    for override in overrides:
+        if not isinstance(override, dict):
+            continue
+        for k, v in override.items():
+            if isinstance(v, dict) and isinstance(result.get(k), dict):
+                result[k] = _deep_merge(result[k], v)
+            else:
+                result[k] = v
+    return result
+
+
+def _diff_keys(builtin: dict, file_cfg: dict, prefix: str = "") -> set:
+    """递归找出 file_cfg 中与内置默认不同的叶子键（点分路径），视为用户微调。"""
+    keys: set = set()
+    for k, v in file_cfg.items():
+        if k == "_user_override":
+            continue
+        path = f"{prefix}{k}"
+        if isinstance(v, dict) and isinstance(builtin.get(k), dict):
+            keys |= _diff_keys(builtin[k], v, path + ".")
+        elif v != builtin.get(k):
+            keys.add(path)
+    return keys
+
+
+def _apply_override_keys(target: dict, source: dict, keys: set) -> dict:
+    """把 source 中指定点分路径的键覆盖到 target（深拷贝避免污染）。"""
+    result = json.loads(json.dumps(target))
+    for path in keys:
+        parts = path.split(".")
+        node = result
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+        parent = source
+        for part in parts[:-1]:
+            parent = parent.get(part, {})
+        if parts[-1] in parent:
+            node[parts[-1]] = parent[parts[-1]]
+    return result
+
+
+# 内置默认表现参数（与 behavior_config.json 全量一致；文件缺失时兜底）
+_DEFAULT_BEHAVIOR: dict = {
+      "persona": "persona_prompt",
+      "private_only": True,
+      "reply": {
+        "base_delay": [
+          1.5,
+          4.0
+        ],
+        "busy_delay": [
+          20,
+          60
+        ],
+        "gap_extra_30m": [
+          2,
+          5
+        ],
+        "gap_extra_2h": [
+          4,
+          9
+        ],
+        "gap_extra_12h": [
+          6,
+          15
+        ],
+        "max_delay": 120,
+        "max_stickers_per_reply": 1,
+        "boost_prob": 0.35
+      },
+      "sticker": {
+        "avoid_repeat": 2,
+        "rate_max": 4,
+        "rate_window": 600,
+        "tags": {
+          "blobcatwave.png": [
+            "开心",
+            "打招呼",
+            "猫"
+          ],
+          "blobcatlove.png": [
+            "爱你",
+            "贴贴",
+            "猫"
+          ],
+          "blobcatmelt.png": [
+            "开心",
+            "撒娇",
+            "融化",
+            "猫"
+          ],
+          "blobcatsnuggle.png": [
+            "贴贴",
+            "安慰",
+            "抱抱",
+            "猫"
+          ],
+          "blobcatheartbroken.png": [
+            "心碎",
+            "难过",
+            "猫"
+          ]
+        }
+      },
+      "sticker_emotion": {
+        "开心": [
+          "开心",
+          "扭一扭",
+          "扭屁股",
+          "摇摇晃晃",
+          "wave",
+          "melt"
+        ],
+        "得意": [
+          "棒",
+          "点赞",
+          "牛",
+          "膜拜",
+          "triumph"
+        ],
+        "夸赞": [
+          "棒",
+          "点赞",
+          "牛",
+          "膜拜"
+        ],
+        "爱你": [
+          "爱你",
+          "爱你2",
+          "贴贴",
+          "love",
+          "kissheart"
+        ],
+        "亲亲": [
+          "亲亲",
+          "亲脸",
+          "偷偷给心",
+          "kissheart"
+        ],
+        "贴贴": [
+          "贴贴",
+          "爱你",
+          "扭屁股",
+          "snuggle"
+        ],
+        "撒娇": [
+          "扭屁股",
+          "贴贴",
+          "摇摇晃晃",
+          "melt"
+        ],
+        "无语": [
+          "呕吼",
+          "不要",
+          "无奈",
+          "吹风",
+          "dead",
+          "facepalm"
+        ],
+        "无奈": [
+          "无奈",
+          "呕吼",
+          "摇摇晃晃",
+          "dead",
+          "disturbed"
+        ],
+        "尴尬": [
+          "脸红",
+          "facepalm",
+          "无奈"
+        ],
+        "生气": [
+          "咬你",
+          "吃掉你",
+          "不准色色",
+          "生气"
+        ],
+        "害羞": [
+          "脸红",
+          "偷偷看",
+          "亲亲",
+          "亲脸"
+        ],
+        "疑问": [
+          "问号",
+          "思考中",
+          "umm"
+        ],
+        "思考中": [
+          "思考中",
+          "问号",
+          "think"
+        ],
+        "难过": [
+          "cry",
+          "sadreach",
+          "heartbroken",
+          "再见",
+          "呕吼"
+        ],
+        "委屈": [
+          "cry",
+          "sadreach",
+          "不要"
+        ],
+        "害怕": [
+          "scared",
+          "shocked"
+        ],
+        "震惊": [
+          "shocked",
+          "openmouth",
+          "呕吼"
+        ],
+        "惊讶": [
+          "openmouth",
+          "shocked",
+          "问号"
+        ],
+        "敷衍": [
+          "不要",
+          "呕吼",
+          "无奈",
+          "dead"
+        ],
+        "紧张": [
+          "sipsweat",
+          "脸红",
+          "偷偷看"
+        ],
+        "困": [
+          "睡觉",
+          "dead"
+        ],
+        "心碎": [
+          "heartbroken",
+          "cry"
+        ],
+        "安慰": [
+          "snuggle",
+          "贴贴",
+          "爱你"
+        ],
+        "色色": [
+          "和我色色",
+          "舔屏",
+          "不准色色"
+        ]
+      },
+      "text_emotion_rules": [
+        [
+          "哈哈|笑死|好耶|嘿嘿|乐死|太好啦|开心|高兴|爽死",
+          "开心"
+        ],
+        [
+          "好看|漂亮|可爱|好美|好帅|喜欢死|太好看",
+          "夸赞"
+        ],
+        [
+          "厉害|太强|牛|优秀|膜拜|佩服|好棒",
+          "得意"
+        ],
+        [
+          "无语|救命|绝了|什么鬼|服了|受不了|麻了|离大谱",
+          "无语"
+        ],
+        [
+          "唉|哎|难过|伤心|委屈|想哭|难受|破防|emo",
+          "难过"
+        ],
+        [
+          "气死|生气|烦死|可恶|气人",
+          "生气"
+        ],
+        [
+          "害羞|不好意思|脸红|羞死",
+          "害羞"
+        ],
+        [
+          "哇|震惊|竟然|居然|我的天|天哪|惊了",
+          "震惊"
+        ],
+        [
+          "想想|让我想想|思考|琢磨|纠结",
+          "思考中"
+        ],
+        [
+          "困|睡觉|晚安|熬不住|好累",
+          "困"
+        ],
+        [
+          "想你了|想你|亲亲|么么|抱抱|爱你",
+          "爱你"
+        ],
+        [
+          "？|啥|什么|为什么|真的吗|是这样吗",
+          "疑问"
+        ]
+      ],
+      "proactive": {
+        "night_prob": 0.3,
+        "day_prob": 0.1,
+        "night_window": [
+          1380,
+          1530
+        ],
+        "day_window": [
+          720,
+          1320
+        ],
+        "loop_interval": 60,
+        "max_retries": 3
+      },
+      "memory": {
+        "max_contexts": 30,
+        "topic_shift_min_overlap": 0.2,
+        "topic_shift_max_gap": 600,
+        "busy_window": 7200
+      },
+      "vision": {
+        "max_images": 3,
+        "timeout": 30,
+        "describe_prompt": "你是憨憨的眼睛。用户刚刚给憨憨发了一张图片，请客观、简短地描述图片内容：画面主体、场景、图片里的文字（如果有）。200 字以内，只描述，不评价，不要揣测发图人的意图。"
+      }
+    }
 
 
 class HanhanPersonaPlugin(Star):
     def __init__(self, context: Context, config: Optional[AstrBotConfig] = None):
         super().__init__(context)
         self.config = config or {}
-        self.persona = PersonaLoader(_PLUGIN_DIR / "persona" / "persona_prompt.md")
+        # 表现参数：内置默认 → 人格模板推荐 → 全局 behavior_config.json（用户微调）
+        self.behavior_file = _PLUGIN_DIR / "behavior_config.json"
+        self.bcfg = self._load_behavior_config()
+        # 人格模板：persona/<名>.md，激活名存配置（模板可带同名 .behavior.json 推荐参数）
+        self.persona_name = str(self.bcfg.get("persona", "persona_prompt"))
+        self.persona_file = _PLUGIN_DIR / "persona" / f"{self.persona_name}.md"
+        if not self.persona_file.exists():
+            logger.warning(f"[hanhan] 人格模板 {self.persona_name} 不存在，回退 persona_prompt")
+            self.persona_name = "persona_prompt"
+            self.persona_file = _PLUGIN_DIR / "persona" / f"{self.persona_name}.md"
+        self.persona = PersonaLoader(self.persona_file)
         self.persona_text = self.persona.load()
         # 传入人格文本：其中的【时间线】表是身份阶段推算的依据（时间不写死）
-        self.memory = MemoryEngine(persona_text=self.persona_text)
-        # 表情包配置（sticker_config.json：多标签 + 补发概率 + 限频，页面可改）
-        self.sticker_cfg_file = _PLUGIN_DIR / "sticker_config.json"
-        scfg = self._load_sticker_config()
+        self.memory = MemoryEngine(persona_text=self.persona_text, **self.bcfg["memory"])
+        st = self.bcfg["sticker"]
         self.stickers = StickerBot(
             _PLUGIN_DIR / "stickers",
-            rate_window=float(scfg.get("rate_window", 600)),
-            rate_max=int(scfg.get("rate_max", 4)),
-            boost_prob=float(scfg.get("boost_prob", 0.35)),
-            tags=scfg.get("tags") or {},
+            avoid_repeat=int(st.get("avoid_repeat", 2)),
+            rate_window=float(st.get("rate_window", 600)),
+            rate_max=int(st.get("rate_max", 4)),
+            boost_prob=float(st.get("boost_prob", 0.35)),
+            tags=st.get("tags") or {},
+            emotion_keywords=self.bcfg.get("sticker_emotion"),
+            text_rules=self.bcfg.get("text_emotion_rules"),
         )
         # 主动消息：深夜语音/白天分享，随机时段（状态持久化在插件目录）
         self.proactive = ProactiveSender(
@@ -91,6 +430,7 @@ class HanhanPersonaPlugin(Star):
             persona_text=self.persona_text,
             sticker_bot=self.stickers,
             state_file=_PLUGIN_DIR / "proactive_state.json",
+            **self.bcfg["proactive"],
         )
         # 图片识别：百炼多模态（配置了 API Key 才启用），让她"看到"用户发的图
         # key 来源：环境变量 HANHAN_BAILIAN_API_KEY > WebUI 插件配置 > 插件目录 bailian.key
@@ -99,6 +439,7 @@ class HanhanPersonaPlugin(Star):
             endpoint=(self.config or {}).get("bailian_endpoint", ""),
             model=(self.config or {}).get("bailian_model", ""),
             key_file=str(_PLUGIN_DIR / "bailian.key"),
+            **self.bcfg["vision"],
         )
         # 诊断：加载时确认识别是否启用（环境变量需在 AstrBot 进程启动前设置）
         logger.info(
@@ -113,47 +454,104 @@ class HanhanPersonaPlugin(Star):
             f"/{_PLUGIN_NAME}/status",
             self.page_status,
             ["GET"],
-            "憨憨插件实时状态（供插件页面调用）",
+            "插件实时状态（供插件页面调用）",
         )
         self.context.register_web_api(
             f"/{_PLUGIN_NAME}/config",
             self.page_update_config,
             ["POST"],
-            "更新憨憨表情包频率参数（供插件页面调用）",
+            "更新人格/表现参数（供插件页面调用）",
         )
 
-    def _load_sticker_config(self) -> dict:
-        """读 sticker_config.json；缺失/损坏时写默认并返回。"""
-        default = {
-            "boost_prob": 0.35,  # LLM 没标表情包时补发一张的概率
-            "rate_max": 4,  # 限频窗口内最多表情包数
-            "rate_window": 600,  # 限频窗口（秒）
-            "tags": {},  # 多标签：文件名 -> 标签列表（可覆盖自动推断）
-        }
-        try:
-            if self.sticker_cfg_file.exists():
-                data = json.loads(self.sticker_cfg_file.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    return data
-        except (OSError, ValueError):
-            logger.warning(f"[hanhan] sticker_config.json 解析失败，使用默认配置: {self.sticker_cfg_file}")
-        try:
-            self.sticker_cfg_file.write_text(
-                json.dumps(default, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except OSError as e:
-            logger.error(f"[hanhan] sticker_config.json 写入失败: {e}")
-        return default
+    def _load_behavior_config(self) -> dict:
+        """加载合并后的表现参数：内置默认 → 人格模板推荐 → 全局配置（用户微调）。
 
-    def _save_sticker_config(self, cfg: dict) -> None:
+        - 全局 behavior_config.json 是唯一存储（全量文件，缺键自动补全）
+        - persona/<名>.behavior.json 为该人格的推荐参数（若存在，覆盖内置默认）
+        - 旧版 sticker_config.json 若存在，其 sticker 段自动迁移合并
+        """
+        # 1) 全局配置（用户微调层）
+        file_cfg: dict = {}
         try:
-            self.sticker_cfg_file.write_text(
-                json.dumps(cfg, ensure_ascii=False, indent=2),
+            if self.behavior_file.exists():
+                data = json.loads(self.behavior_file.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    file_cfg = data
+        except (OSError, ValueError):
+            logger.warning(f"[hanhan] behavior_config.json 解析失败，使用默认配置: {self.behavior_file}")
+        # 2) 旧 sticker_config.json 迁移（v1.0.24 及之前）
+        legacy = _PLUGIN_DIR / "sticker_config.json"
+        if legacy.exists() and not file_cfg.get("sticker"):
+            try:
+                data = json.loads(legacy.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    file_cfg["sticker"] = data
+                    logger.info("[hanhan] 已从 sticker_config.json 迁移 sticker 段到 behavior_config.json")
+            except (OSError, ValueError):
+                pass
+        # 3) 模板推荐参数
+        persona_name = str(file_cfg.get("persona", _DEFAULT_BEHAVIOR.get("persona", "persona_prompt")))
+        tpl_cfg: dict = {}
+        tpl_file = _PLUGIN_DIR / "persona" / f"{persona_name}.behavior.json"
+        if tpl_file.exists():
+            try:
+                data = json.loads(tpl_file.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    tpl_cfg = data
+            except (OSError, ValueError):
+                logger.warning(f"[hanhan] 人格模板参数解析失败: {tpl_file}")
+        # 4) 合并：内置默认 → 模板推荐 → 用户微调（仅用户改过的键，细粒度）
+        merged = _deep_merge(_DEFAULT_BEHAVIOR, tpl_cfg)
+        user_keys = set(file_cfg.get("_user_override", []) or [])
+        user_keys |= _diff_keys(_DEFAULT_BEHAVIOR, file_cfg)  # 与内置默认不同的键视为用户微调
+        if user_keys:
+            merged = _apply_override_keys(merged, file_cfg, user_keys)
+        merged.pop("_user_override", None)
+        merged["persona"] = persona_name
+        return merged
+
+    def _save_behavior_config(self, cfg: dict, updated_keys: Optional[list] = None) -> None:
+        """增量持久化全局配置：只写 persona 与用户本次改过的键（微调层，不写模板参数）。"""
+        try:
+            data = (
+                json.loads(self.behavior_file.read_text(encoding="utf-8"))
+                if self.behavior_file.exists()
+                else {}
+            )
+        except (OSError, ValueError):
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        data["persona"] = cfg.get("persona", self.bcfg.get("persona", "persona_prompt"))
+        if updated_keys:
+            for path in updated_keys:
+                parts = path.split(".")
+                node = data
+                for part in parts[:-1]:
+                    node = node.setdefault(part, {})
+                parent = cfg
+                for part in parts[:-1]:
+                    parent = parent.get(part, {})
+                if parts[-1] in parent:
+                    node[parts[-1]] = parent[parts[-1]]
+            seen = set(data.get("_user_override", []) or []) | set(updated_keys)
+            data["_user_override"] = sorted(seen)
+        try:
+            self.behavior_file.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
         except OSError as e:
-            logger.error(f"[hanhan] sticker_config.json 保存失败: {e}")
+            logger.error(f"[hanhan] behavior_config.json 保存失败: {e}")
+
+    def list_persona_templates(self) -> list[str]:
+        """列出 persona/ 目录下的人格模板名（*.md，不含 .behavior.json）。"""
+        try:
+            return sorted(
+                p.stem for p in (_PLUGIN_DIR / "persona").glob("*.md")
+            )
+        except OSError:
+            return []
 
     def _session_id(self, event: AstrMessageEvent) -> str:
         """获取会话标识（unified_msg_origin），兼容不同 AstrBot 版本。
@@ -186,6 +584,10 @@ class HanhanPersonaPlugin(Star):
         except Exception:
             return False
 
+    def _private_only(self) -> bool:
+        """人格是否仅私聊生效（behavior_config.json 的 private_only，可调）。"""
+        return bool(self.bcfg.get("private_only", True))
+
     async def _human_pause(self, sid: str) -> None:
         """模拟真人回复节奏：看完消息 + 打字 + 情境延迟，避免秒回露出 AI 味。
 
@@ -194,19 +596,26 @@ class HanhanPersonaPlugin(Star):
         - 隔得越久回得越慢：30min+ 附加 2~5s；2h+ 附加 4~9s；12h+ 附加 6~15s
         - 总延迟封顶 120s，避免像卡死
         """
+        rp = self.bcfg.get("reply", {})
+        base = rp.get("base_delay", [1.5, 4.0])
+        busy = rp.get("busy_delay", [20, 60])
+        gap_30m = rp.get("gap_extra_30m", [2, 5])
+        gap_2h = rp.get("gap_extra_2h", [4, 9])
+        gap_12h = rp.get("gap_extra_12h", [6, 15])
+        max_delay = float(rp.get("max_delay", 120))
         delay = 0.0
         if self.memory.take_busy_pause(sid):
-            delay = random.uniform(20, 60)  # 她说去忙了，这一轮"忙完回来"
+            delay = random.uniform(*busy)  # 她说去忙了，这一轮"忙完回来"
         else:
-            delay = random.uniform(1.5, 4.0)
+            delay = random.uniform(*base)
             gap = self.memory.gap_seconds(sid) or 0.0
             if gap > 12 * 3600:
-                delay += random.uniform(6, 15)  # 隔了很久，像刚想起来回
+                delay += random.uniform(*gap_12h)  # 隔了很久，像刚想起来回
             elif gap > 2 * 3600:
-                delay += random.uniform(4, 9)
+                delay += random.uniform(*gap_2h)
             elif gap > 30 * 60:
-                delay += random.uniform(2, 5)
-        await asyncio.sleep(min(delay, 120.0))
+                delay += random.uniform(*gap_30m)
+        await asyncio.sleep(min(delay, max_delay))
 
     # ---------- LLM 请求钩子：人格 + 情景感知 ----------
 
@@ -215,7 +624,7 @@ class HanhanPersonaPlugin(Star):
         """LLM 请求前：注入人格与情景感知，截断过长上下文（只修改 req）。"""
         if not self.persona_text or not self._persona_enabled(event):
             return
-        if _PERSONA_ONLY_PRIVATE and not self._is_private(event):
+        if self._private_only() and not self._is_private(event):
             return  # 群聊不注入人格，走默认回复
         sid = self._session_id(event)
 
@@ -249,7 +658,7 @@ class HanhanPersonaPlugin(Star):
         """
         if not self.vision.enabled():
             return
-        if _PERSONA_ONLY_PRIVATE and not self._is_private(event):
+        if self._private_only() and not self._is_private(event):
             return
         imgs = [
             c for c in event.message_obj.message
@@ -295,7 +704,7 @@ class HanhanPersonaPlugin(Star):
         """发送前处理 LLM 结果：分条、去句号、[表情包:情绪词] 换图片。"""
         if not self._persona_enabled(event):
             return
-        if _PERSONA_ONLY_PRIVATE and not self._is_private(event):
+        if self._private_only() and not self._is_private(event):
             return  # 群聊不处理人格回复格式
         result = event.get_result()
         if (
@@ -320,7 +729,7 @@ class HanhanPersonaPlugin(Star):
             and not self.stickers.is_rate_limited(sid)
             and random.random() < self.stickers.boost_prob
         ):
-            emotion = infer_emotion(text)
+            emotion = infer_emotion(text, self.stickers.text_rules)
             if emotion:
                 parts.append(("img", emotion))
                 logger.info(f"[hanhan] 补发表情包（文本情绪推断: {emotion}）")
@@ -339,10 +748,11 @@ class HanhanPersonaPlugin(Star):
 
         # 清空默认结果，所有消息按序主动发送，保证分条顺序
         event.clear_result()
-        sent_sticker = False  # 每轮回复最多 1 张表情包
+        max_stickers = int(self.bcfg.get("reply", {}).get("max_stickers_per_reply", 1))
+        sent_sticker = 0  # 每轮回复表情包上限（可配置）
         for kind, payload in parts:
             if kind == "img":
-                if sent_sticker or self.stickers.is_rate_limited(sid):
+                if sent_sticker >= max_stickers or self.stickers.is_rate_limited(sid):
                     continue
                 img = self.stickers.pick(sid, payload)
                 if img is None:
@@ -351,7 +761,7 @@ class HanhanPersonaPlugin(Star):
                 await event.send(MessageChain().file_image(str(ensure_sendable(img))))
                 self.stickers.record_used(sid, img.name)
                 self.stickers.record_sent(sid)
-                sent_sticker = True
+                sent_sticker += 1
             else:
                 await event.send(MessageChain().message(payload))
 
@@ -378,6 +788,24 @@ class HanhanPersonaPlugin(Star):
                     "default_enabled": True,
                     "enabled_sessions": enabled_cnt,
                     "disabled_sessions": disabled_cnt,
+                    "active": self.persona_name,
+                    "templates": self.list_persona_templates(),
+                    "private_only": self._private_only(),
+                    "params": {
+                        "reply": self.bcfg.get("reply", {}),
+                        "proactive": {
+                            "night_prob": self.proactive.night_prob,
+                            "day_prob": self.proactive.day_prob,
+                            "night_window": list(self.proactive.night_window),
+                            "day_window": list(self.proactive.day_window),
+                        },
+                        "sticker": {
+                            "avoid_repeat": self.stickers.avoid_repeat,
+                            "rate_max": self.stickers.rate_max,
+                            "rate_window": self.stickers.rate_window,
+                            "boost_prob": self.stickers.boost_prob,
+                        },
+                    },
                 },
                 "proactive": {
                     "active": self.proactive.is_active(),
@@ -408,7 +836,17 @@ class HanhanPersonaPlugin(Star):
         )
 
     async def page_update_config(self) -> dict:
-        """插件页面配置接口：修改表情包频率参数（白名单字段，热生效并持久化）。"""
+        """插件页面配置接口：更新人格模板与表现参数（白名单字段，热生效并持久化）。
+
+        支持字段：
+        - persona: 切换人格模板（文件名不含 .md，须在 persona/ 目录，需重载插件生效）
+        - private_only: bool
+        - reply.*: base_delay/busy_delay/gap_extra_* 为 [min,max] 秒；max_delay 秒；
+          max_stickers_per_reply 张；boost_prob 0~1
+        - sticker.rate_max / rate_window / avoid_repeat
+        - proactive.night_prob / day_prob（0~1，次日计划生效）；night_window / day_window
+          为 [起,止] 绝对分钟
+        """
         logger.info("[hanhan] 插件页面调用 /config")
         try:
             data = await request.json(default={})
@@ -416,32 +854,99 @@ class HanhanPersonaPlugin(Star):
             return error_response(f"请求体解析失败: {e}", status_code=400)
         if not isinstance(data, dict):
             return error_response("请求体必须是 JSON 对象", status_code=400)
-        cfg = self._load_sticker_config()
-        updated = {}
+
+        cfg = self._load_behavior_config()
+        updated: dict = {}
         try:
+            # 人格模板切换（需重载生效）
+            if "persona" in data:
+                name = str(data["persona"]).strip()
+                if name not in self.list_persona_templates():
+                    return error_response(f"人格模板不存在：{name}", status_code=400)
+                cfg["persona"] = name
+                updated["persona"] = name
+            if "private_only" in data:
+                cfg["private_only"] = bool(data["private_only"])
+                updated["private_only"] = cfg["private_only"]
+            # 回复节奏
+            rp = cfg.setdefault("reply", {})
+            for key in ("base_delay", "busy_delay", "gap_extra_30m", "gap_extra_2h", "gap_extra_12h"):
+                if key in data:
+                    v = data[key]
+                    if not (isinstance(v, list) and len(v) == 2
+                            and all(isinstance(x, (int, float)) and 0 <= float(x) <= 3600 for x in v)):
+                        raise ValueError
+                    rp[key] = [float(x) for x in v]
+                    updated[f"reply.{key}"] = rp[key]
+            if "max_delay" in data:
+                v = float(data["max_delay"])
+                if not 0 <= v <= 3600:
+                    raise ValueError
+                rp["max_delay"], updated["reply.max_delay"] = v, v
+            if "max_stickers_per_reply" in data:
+                v = int(data["max_stickers_per_reply"])
+                if not 1 <= v <= 10:
+                    raise ValueError
+                rp["max_stickers_per_reply"], updated["reply.max_stickers_per_reply"] = v, v
             if "boost_prob" in data:
                 v = float(data["boost_prob"])
                 if not 0 <= v <= 1:
                     raise ValueError
-                cfg["boost_prob"], updated["boost_prob"] = v, v
+                rp["boost_prob"], updated["reply.boost_prob"] = v, v
+            # 表情包限频
+            st = cfg.setdefault("sticker", {})
             if "rate_max" in data:
                 v = int(data["rate_max"])
                 if not 1 <= v <= 20:
                     raise ValueError
-                cfg["rate_max"], updated["rate_max"] = v, v
+                st["rate_max"], updated["sticker.rate_max"] = v, v
             if "rate_window" in data:
                 v = float(data["rate_window"])
                 if not 30 <= v <= 86400:
                     raise ValueError
-                cfg["rate_window"], updated["rate_window"] = v, v
+                st["rate_window"], updated["sticker.rate_window"] = v, v
+            if "avoid_repeat" in data:
+                v = int(data["avoid_repeat"])
+                if not 0 <= v <= 10:
+                    raise ValueError
+                st["avoid_repeat"], updated["sticker.avoid_repeat"] = v, v
+            # 主动消息概率与窗口
+            pa = cfg.setdefault("proactive", {})
+            if "night_prob" in data:
+                v = float(data["night_prob"])
+                if not 0 <= v <= 1:
+                    raise ValueError
+                pa["night_prob"], updated["proactive.night_prob"] = v, v
+            if "day_prob" in data:
+                v = float(data["day_prob"])
+                if not 0 <= v <= 1:
+                    raise ValueError
+                pa["day_prob"], updated["proactive.day_prob"] = v, v
+            for key in ("night_window", "day_window"):
+                if key in data:
+                    v = data[key]
+                    if not (isinstance(v, list) and len(v) == 2
+                            and all(isinstance(x, (int, float)) for x in v)):
+                        raise ValueError
+                    pa[key] = [int(x) for x in v]
+                    updated[f"proactive.{key}"] = pa[key]
         except (TypeError, ValueError):
-            return error_response("参数不合法（boost_prob 0~1，rate_max 1~20，rate_window 30~86400）", status_code=400)
-        # 热生效 + 持久化
-        self.stickers.boost_prob = float(cfg["boost_prob"])
-        self.stickers.rate_max = int(cfg["rate_max"])
-        self.stickers.rate_window = float(cfg["rate_window"])
-        self._save_sticker_config(cfg)
-        logger.info(f"[hanhan] 插件页面更新表情包参数: {updated}")
+            return error_response(
+                "参数不合法：延迟/窗口为 [min,max] 数组，概率 0~1，rate_max 1~20，rate_window 30~86400",
+                status_code=400,
+            )
+        # 热生效（persona 切换与 private_only 需重载）
+        self.bcfg = cfg
+        self.stickers.boost_prob = float(cfg.get("reply", {}).get("boost_prob", self.stickers.boost_prob))
+        self.stickers.rate_max = int(cfg.get("sticker", {}).get("rate_max", self.stickers.rate_max))
+        self.stickers.rate_window = float(cfg.get("sticker", {}).get("rate_window", self.stickers.rate_window))
+        self.stickers.avoid_repeat = int(cfg.get("sticker", {}).get("avoid_repeat", self.stickers.avoid_repeat))
+        self.proactive.night_prob = float(cfg.get("proactive", {}).get("night_prob", self.proactive.night_prob))
+        self.proactive.day_prob = float(cfg.get("proactive", {}).get("day_prob", self.proactive.day_prob))
+        self.proactive.night_window = tuple(cfg.get("proactive", {}).get("night_window", list(self.proactive.night_window)))
+        self.proactive.day_window = tuple(cfg.get("proactive", {}).get("day_window", list(self.proactive.day_window)))
+        self._save_behavior_config(cfg, list(updated.keys()))
+        logger.info(f"[hanhan] 插件页面更新配置: {updated}")
         return json_response({"ok": True, **updated})
 
     # ---------- LLM 工具：表情包 ----------
