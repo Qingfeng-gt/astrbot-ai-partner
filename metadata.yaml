@@ -1,0 +1,22 @@
+name: astrbot_plugin_hanhan
+display_name: 憨憨人格
+short_desc: 把前任"憨憨"蒸馏成 AstrBot 人格——迂回、学习优先、深夜语音的大学同班前任
+desc: |
+  把 ex-skill 生成的前任人格（exes/hanhan/SKILL.md）转写为 AstrBot 人格。
+
+  ## 功能
+  - 通过 on_llm_request 钩子把人格提示词注入 req.system_prompt，所有 LLM 回复均以憨憨身份进行
+  - 人格内容：关系记忆（算法课相识、图书馆陪学、深夜语音、分手后分享）+ 人物性格（迂回表达、学习优先、回避直球情感问题）
+  - 支持命令：
+    - /憨憨开关 —— 按会话切换人格开关
+    - /憨憨状态 —— 查看当前会话开关状态
+  - 人格提示词在同目录 persona_prompt.md，可直接编辑
+
+  ## 安装
+  将本文件夹复制到 AstrBot 插件目录（data/plugins/ 或 addons/），或在 WebUI 插件管理安装本压缩包，然后重载插件。
+version: 1.0.2
+author: yourname
+tags:
+  - 人格
+  - 角色扮演
+  - 前任
