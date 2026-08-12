@@ -56,7 +56,7 @@ _SITUATION_MARK = "<!-- hanhan-situation -->"
 _PLUGIN_DIR = Path(__file__).parent
 # 插件名/版本（Web API 路由前缀与页面展示用，版本与 metadata.yaml 同步）
 _PLUGIN_NAME = "astrbot_plugin_hanhan"
-_PLUGIN_VERSION = "1.0.24"
+_PLUGIN_VERSION = "1.0.25"
 
 
 def _fmt_window(window: tuple[int, int]) -> str:
@@ -363,6 +363,7 @@ class HanhanPersonaPlugin(Star):
         路由 /astrbot_plugin_hanhan/status 在 __init__ 中注册，由
         pages/overview/index.html 通过 bridge.apiGet("status") 调用。
         """
+        logger.info("[hanhan] 插件页面调用 /status")
         try:
             sticker_count = len(self.stickers._all_files())
         except Exception:
@@ -408,6 +409,7 @@ class HanhanPersonaPlugin(Star):
 
     async def page_update_config(self) -> dict:
         """插件页面配置接口：修改表情包频率参数（白名单字段，热生效并持久化）。"""
+        logger.info("[hanhan] 插件页面调用 /config")
         try:
             data = await request.json(default={})
         except Exception as e:

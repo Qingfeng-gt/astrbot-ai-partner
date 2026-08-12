@@ -229,9 +229,11 @@
         if (cls) el.className = "value " + cls;
       }
 
-      // bridge SDK 由 AstrBot 在服务端重写 HTML 时注入到 </body> 前（普通脚本）；
+      // bridge SDK 由 AstrBot 在服务端重写 HTML 时注入（普通脚本，位于文档末尾）；
       // 本脚本用 type="module"（延迟到解析完成后执行，排在注入脚本之后），
       // 再轮询兜底，确保 window.AstrBotPluginPage 一定已就绪。
+      // 注意：注释里不能出现 body 结束标签的字面形式——服务端注入 bridge 时
+      // 按第一个结束标签定位，写在注释里会把 bridge tag 插进脚本内容导致本脚本损坏。
       async function waitForBridge(timeoutMs = 6000) {
         const start = Date.now();
         while (!window.AstrBotPluginPage) {
@@ -243,19 +245,82 @@
         return window.AstrBotPluginPage;
       }
 
-      (async () => {
-        const bridge = await waitForBridge();
+      // 带超时的 promise：卡住时给出明确提示而不是无限转圈
+      function withTimeout(promise, ms, label) {
+        return Promise.race([
+          promise,
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error(`${label} 超时（${Math.round(ms / 1000)}s）`)), ms),
+          ),
+        ]);
+      }
 
+      function setLoading(text) {
+        $("loading").textContent = text;
+      }
+
+      // 同源直连兜底：iframe 与 dashboard 同源（页面路径为相对 URL），
+      // 直接 fetch 会带上认证 cookie，完全绕开 postMessage bridge。
+      async function directFetch(method, path, body) {
+        const r = await fetch(path, {
+          method,
+          headers: { "Content-Type": "application/json", Accept: "application/json" },
+          body: body ? JSON.stringify(body) : undefined,
+        });
+        if (!r.ok) throw new Error(`直连 HTTP ${r.status}`);
+        const data = await r.json();
+        // 兼容 {status:"ok",data:...} 包装与裸对象两种返回
+        if (data && typeof data === "object" && "status" in data && "data" in data) {
+          if (data.status === "error") throw new Error(data.message || "接口返回错误");
+          return data.data;
+        }
+        return data;
+      }
+
+      // bridge 优先，超时/失败自动回退同源直连
+      async function apiGet(bridge, path) {
+        if (bridge) {
+          try {
+            return await withTimeout(bridge.apiGet(path), 8000, "bridge 请求");
+          } catch (e) {
+            setLoading(`bridge 请求失败（${e.message}），改用直连…`);
+          }
+        }
+        return await directFetch("GET", `/api/v1/plugins/extensions/astrbot_plugin_hanhan/${path}`);
+      }
+      async function apiPost(bridge, path, body) {
+        if (bridge) {
+          try {
+            return await withTimeout(bridge.apiPost(path, body), 8000, "bridge 请求");
+          } catch (e) {
+            // 继续走直连
+          }
+        }
+        return await directFetch("POST", `/api/v1/plugins/extensions/astrbot_plugin_hanhan/${path}`, body);
+      }
+
+      (async () => {
+        let bridge = null;
         try {
-          const ctx = await bridge.ready();
-          if (ctx.pageTitle) $("title").textContent = ctx.pageTitle;
+          setLoading("等待 bridge SDK…");
+          bridge = await withTimeout(waitForBridge(), 4000, "bridge SDK 加载");
+
+          setLoading("等待页面上下文…");
+          let ctx = null;
+          try {
+            ctx = await withTimeout(bridge.ready(), 4000, "页面上下文");
+            if (ctx.pageTitle) $("title").textContent = ctx.pageTitle;
+          } catch (e) {
+            // 上下文拿不到也无妨，页面静态内容照常展示
+          }
         } catch (e) {
-          // 上下文拿不到也无妨，页面静态内容照常展示
+          setLoading("bridge 不可用，改用直连（不影响功能）…");
+          bridge = null;
         }
 
-        let s = null;
         try {
-          s = await bridge.apiGet("status");
+          setLoading("正在请求状态数据…");
+          const s = await apiGet(bridge, "status");
           $("subtitle").textContent = `${s.name} · v${s.version}`;
           $("error").hidden = true;
 
@@ -270,6 +335,7 @@
           setStat("s-stickers", `${s.stickers.count} 张`, "");
           $("stats").hidden = false;
           $("loading").hidden = true;
+          $("loading").textContent = "";
 
           // 概率事件
           $("p-night-prob").textContent = `${Math.round(s.proactive.night_prob * 100)}%（每晚）`;
@@ -305,7 +371,7 @@
             $("m-save").disabled = true;
             $("m-save-msg").textContent = "保存中…";
             try {
-              const res = await bridge.apiPost("config", {
+              const res = await apiPost(bridge, "config", {
                 boost_prob: Number($("m-boost").value) / 100,
                 rate_max: Number($("m-rate-max").value),
                 rate_window: Number($("m-rate-window").value),
@@ -321,7 +387,11 @@
           $("loading").hidden = true;
           const err = $("error");
           err.hidden = false;
-          err.textContent = "状态加载失败：" + (e && e.message ? e.message : e) + "（页面静态内容不受影响）";
+          err.textContent =
+            "状态加载失败：" + (e && e.message ? e.message : e) +
+            "\n排查：① 确认插件已重载（插件管理 → 憨憨人格 → 重新加载）；" +
+            "② 重载后再看日志（AstrBot 后台 logs）里有没有「插件页面调用 /status」——" +
+            "有则问题在前端通信，没有则说明请求未到达后端。";
         }
 
         $("persona-desc").textContent =
