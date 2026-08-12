@@ -1,12 +1,19 @@
-"""表情包选择器：情绪词匹配 + 同义词兜底 + 防连续重复 + 发送频率控制。
+"""表情包选择器：多标签匹配 + 文本情绪推断 + 防连续重复 + 发送频率控制。
 
-匹配优先级：
-1. 情绪词直接匹配文件名（如 [表情包:开心] → catbug-开心.webp）
-2. 情绪词同义词表（如 "无语" 无直接命中时尝试 呕吼/思考中/不要）
-3. 随机兜底
+多标签匹配：
+- 每个表情包有 0..N 个标签（情绪词）。标签来源：
+  1. sticker_config.json 里手写的 tags（文件名 → 标签列表，最可靠，可覆盖自动推断）
+  2. 自动推断：文件名包含情绪词或其关键词（如 catbug-开心.webp → 开心；blobcatcry.png → 难过）
+- pick() 按"命中标签数"打分：请求情绪命中标签最多的表情包优先，同分随机
+- 全部无命中时退回文件名关键词匹配（同义词表），再退回随机
+
+频率控制：
+- 限频（窗口内最多 N 张）+ 连续不重复同一张
+- boost_prob：LLM 没标表情包时，回复补发一张的概率（由 main.py 调用）
 """
 
 import random
+import re
 import time
 from pathlib import Path
 from typing import Optional
@@ -67,12 +74,37 @@ EMOTION_TO_KEYWORDS: dict[str, list[str]] = {
     "色色": ["和我色色", "舔屏", "不准色色"],
 }
 
+# 回复文本 → 情绪词（补发表情包时从文本推断情绪）
+TEXT_EMOTION_RULES: list[tuple[str, str]] = [
+    (r"哈哈|笑死|好耶|嘿嘿|乐死|太好啦|开心|高兴|爽死", "开心"),
+    (r"好看|漂亮|可爱|好美|好帅|喜欢死|太好看", "夸赞"),
+    (r"厉害|太强|牛|优秀|膜拜|佩服|好棒", "得意"),
+    (r"无语|救命|绝了|什么鬼|服了|受不了|麻了|离大谱", "无语"),
+    (r"唉|哎|难过|伤心|委屈|想哭|难受|破防|emo", "难过"),
+    (r"气死|生气|烦死|可恶|气人", "生气"),
+    (r"害羞|不好意思|脸红|羞死", "害羞"),
+    (r"哇|震惊|竟然|居然|我的天|天哪|惊了", "震惊"),
+    (r"想想|让我想想|思考|琢磨|纠结", "思考中"),
+    (r"困|睡觉|晚安|熬不住|好累", "困"),
+    (r"想你了|想你|亲亲|么么|抱抱|爱你", "爱你"),
+    (r"？|啥|什么|为什么|真的吗|是这样吗", "疑问"),
+]
+
+
+def infer_emotion(text: str) -> Optional[str]:
+    """从回复文本推断情绪词（用于 LLM 没标表情包时补发）；无命中返回 None。"""
+    for pattern, emotion in TEXT_EMOTION_RULES:
+        if re.search(pattern, text):
+            return emotion
+    return None
+
 
 class StickerBot:
     """从 stickers/ 目录挑选表情包。
 
-    - pick(session_id, keyword)：按情绪匹配，每会话避免连续重复同一张
+    - pick(session_id, keyword)：多标签匹配（命中数打分），每会话避免连续重复同一张
     - is_rate_limited(session_id)：限制单位时间窗口内的发送量（防刷屏）
+    - tags：手写标签（文件名 → 标签列表），与自动推断合并使用
     """
 
     def __init__(
@@ -81,11 +113,19 @@ class StickerBot:
         avoid_repeat: int = 2,
         rate_window: float = 600.0,
         rate_max: int = 3,
+        boost_prob: float = 0.3,
+        tags: Optional[dict] = None,
     ):
         self.sticker_dir = Path(sticker_dir)
         self.avoid_repeat = avoid_repeat
         self.rate_window = rate_window
         self.rate_max = rate_max
+        self.boost_prob = boost_prob
+        # 手写标签：文件名(小写) -> 标签列表
+        self.tags: dict[str, list[str]] = {
+            str(k).lower(): [str(t).strip() for t in v if str(t).strip()]
+            for k, v in (tags or {}).items()
+        }
         self._recent_used: dict[str, list[str]] = {}  # 会话 -> 最近用过的文件名
         self._sent_times: dict[str, list[float]] = {}  # 会话 -> 发送时间戳
 
@@ -99,6 +139,35 @@ class StickerBot:
         except OSError:
             return []
 
+    def _auto_tags(self, p: Path) -> list[str]:
+        """自动推断标签：文件名包含情绪词或其任一关键词即打上该情绪标签。"""
+        stem = p.stem.lower()
+        return [
+            emo
+            for emo, kws in EMOTION_TO_KEYWORDS.items()
+            if emo.lower() in stem or any(kw in stem for kw in kws)
+        ]
+
+    def tags_of(self, p: Path) -> list[str]:
+        """表情包的完整标签：手写标签 + 自动推断（去重保序）。"""
+        seen: list[str] = []
+        for tag in [*self.tags.get(p.name.lower(), []), *self._auto_tags(p)]:
+            if tag not in seen:
+                seen.append(tag)
+        return seen
+
+    def _tag_stats(self) -> dict:
+        """标签统计：每个标签覆盖的表情包数量（供页面展示）。"""
+        stats: dict[str, int] = {}
+        for p in self._all_files():
+            for tag in self._auto_tags(p):
+                stats[tag] = stats.get(tag, 0) + 1
+        return stats
+
+    def _tagged_count(self) -> int:
+        """至少有一个标签的表情包数量（手写或自动均可）。"""
+        return sum(1 for p in self._all_files() if self.tags_of(p))
+
     @staticmethod
     def _candidates(files: list[Path], keyword: Optional[str]) -> list[Path]:
         """按关键词筛文件（文件名包含关键词，大小写不敏感）。"""
@@ -108,7 +177,7 @@ class StickerBot:
         return [p for p in files if kw in p.stem.lower()]
 
     def pick(self, session_id: str, keyword: Optional[str] = None) -> Optional[Path]:
-        """按情绪词挑选表情包；匹配不到返回随机一张；目录为空返回 None。"""
+        """按情绪词挑选表情包（多标签命中数优先）；无命中随机；目录为空返回 None。"""
         files = self._all_files()
         if not files:
             return None
@@ -117,18 +186,21 @@ class StickerBot:
         recent = set(self._recent_used.get(session_id, [])[-self.avoid_repeat:])
         pool = [p for p in files if p.name not in recent] or files
 
-        # 1) 情绪词直接匹配
-        matched = self._candidates(pool, keyword)
-        # 2) 同义词候选
-        if not matched and keyword:
-            for alt in EMOTION_TO_KEYWORDS.get(keyword, []):
+        if keyword and keyword.strip():
+            kw = keyword.strip()
+            # 1) 多标签匹配：命中标签数越多越优先，同分随机
+            scored = [(self.tags_of(p).count(kw), p) for p in pool]
+            best = max(s for s, _ in scored)
+            if best > 0:
+                top = [p for s, p in scored if s == best]
+                return random.choice(top)
+            # 2) 无命中：同义词关键词兜底（现有逻辑）
+            for alt in EMOTION_TO_KEYWORDS.get(kw, []):
                 matched = self._candidates(pool, alt)
                 if matched:
-                    break
+                    return random.choice(matched)
         # 3) 随机兜底
-        if not matched:
-            return random.choice(pool) if pool else None
-        return random.choice(matched)
+        return random.choice(pool) if pool else None
 
     def record_used(self, session_id: str, name: str) -> None:
         """记录本会话用过的表情包（用于避免重复）。"""

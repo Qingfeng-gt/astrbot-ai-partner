@@ -50,12 +50,6 @@
       }
       h1 { font-size: 20px; font-weight: 600; }
       .sub { color: var(--muted); font-size: 13px; margin-bottom: 18px; }
-      .badge {
-        display: inline-block; padding: 2px 10px; border-radius: 999px;
-        font-size: 12px; font-weight: 500;
-      }
-      .badge.on { background: var(--ok-soft); color: var(--ok); }
-      .badge.ver { background: var(--accent-soft); color: var(--accent); }
       .card {
         background: var(--card); border: 1px solid var(--border);
         border-radius: var(--radius); padding: 16px 18px; margin-bottom: 14px;
@@ -82,8 +76,12 @@
         background: var(--code-bg); border-radius: 6px; padding: 1px 7px;
         font-size: 12.5px; font-family: "Cascadia Code", Consolas, monospace;
       }
-      .desc { font-size: 13.5px; color: var(--text); white-space: pre-line; }
       .muted { color: var(--muted); font-size: 12.5px; }
+      .tag {
+        display: inline-block; background: var(--accent-soft); color: var(--accent);
+        border-radius: 999px; padding: 0 8px; margin: 1px 3px 1px 0;
+        font-size: 12px;
+      }
       footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 20px; }
       footer a { color: var(--accent); text-decoration: none; }
       .error {
@@ -92,6 +90,18 @@
       }
       html[data-theme="dark"] .error { background: #3b1212; border-color: #7f1d1d; color: #fca5a5; }
       .loading { color: var(--muted); font-size: 13px; padding: 8px 2px; }
+      input[type="number"], input[type="range"] { accent-color: var(--accent); }
+      input[type="number"] {
+        background: var(--bg); border: 1px solid var(--border); color: var(--text);
+        border-radius: 8px; padding: 4px 8px; font-size: 13px;
+      }
+      button {
+        background: var(--accent); color: #fff; border: none; border-radius: 8px;
+        padding: 6px 16px; font-size: 13px; cursor: pointer;
+      }
+      button:disabled { opacity: 0.5; cursor: default; }
+      .cfg-row { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+      .cfg-row label { font-size: 13px; color: var(--muted); flex-basis: 100%; }
     </style>
   </head>
   <body>
@@ -137,6 +147,59 @@
       </div>
 
       <div class="card">
+        <h2>概率事件</h2>
+        <table>
+          <tr><th>深夜主动概率</th><td id="p-night-prob">—</td></tr>
+          <tr><th>白天主动概率</th><td id="p-day-prob">—</td></tr>
+          <tr><th>深夜窗口</th><td id="p-night-window">—</td></tr>
+          <tr><th>白天窗口</th><td id="p-day-window">—</td></tr>
+          <tr><th>今日深夜计划</th><td id="p-night-plan">—</td></tr>
+          <tr><th>今日白天计划</th><td id="p-day-plan">—</td></tr>
+          <tr><th>上次深夜</th><td id="p-last-night">—</td></tr>
+          <tr><th>上次白天</th><td id="p-last-day">—</td></tr>
+        </table>
+        <p class="muted" id="p-detail" style="margin-top: 10px"></p>
+      </div>
+
+      <div class="card">
+        <h2>表情包管理</h2>
+        <div class="grid">
+          <div class="stat">
+            <div class="label">总数</div>
+            <div class="value accent" id="m-count">—</div>
+          </div>
+          <div class="stat">
+            <div class="label">已打标签</div>
+            <div class="value" id="m-tagged">—</div>
+          </div>
+        </div>
+        <p class="muted" style="margin-top: 10px">标签分布（文件名自动推断 + 手写配置）</p>
+        <div id="m-tags" style="margin-top: 6px">—</div>
+
+        <div class="cfg-row">
+          <label>补发概率：LLM 没标表情包时，按这个概率从回复文本推断情绪补一张</label>
+          <input type="range" id="m-boost" min="0" max="100" step="5" style="flex:1" />
+          <span class="muted" id="m-boost-val" style="min-width: 44px"></span>
+        </div>
+        <div class="cfg-row">
+          <label>限频：窗口（秒）内最多张数，防止刷屏</label>
+          <input type="number" id="m-rate-max" min="1" max="20" style="width: 70px" />
+          <span class="muted">张 /</span>
+          <input type="number" id="m-rate-window" min="30" max="86400" style="width: 90px" />
+          <span class="muted">秒</span>
+        </div>
+        <div style="margin-top: 14px">
+          <button id="m-save" disabled>保存参数</button>
+          <span class="muted" id="m-save-msg" style="margin-left: 8px"></span>
+        </div>
+        <p class="muted" style="margin-top: 10px">
+          多标签匹配：编辑插件目录下 <code>sticker_config.json</code> 的
+          <code>tags</code>（文件名 → 标签列表，可多个），按命中标签数选图；
+          文件名含情绪词的会自动打标（如 catbug-开心.webp、blobcatcry.png）。
+        </p>
+      </div>
+
+      <div class="card">
         <h2>使用指南</h2>
         <table>
           <tr><th><code>/憨憨开关</code></th><td>切换本会话人格开关</td></tr>
@@ -149,7 +212,7 @@
 
       <div class="card">
         <h2>她是憨憨</h2>
-        <div class="desc" id="persona-desc"></div>
+        <div class="muted" id="persona-desc" style="white-space: pre-line"></div>
       </div>
 
       <footer>
@@ -182,6 +245,7 @@
 
       (async () => {
         const bridge = await waitForBridge();
+
         try {
           const ctx = await bridge.ready();
           if (ctx.pageTitle) $("title").textContent = ctx.pageTitle;
@@ -189,26 +253,70 @@
           // 上下文拿不到也无妨，页面静态内容照常展示
         }
 
+        let s = null;
         try {
-          const s = await bridge.apiGet("status");
+          s = await bridge.apiGet("status");
           $("subtitle").textContent = `${s.name} · v${s.version}`;
           $("error").hidden = true;
 
+          // 实时状态
           setStat("s-version", "v" + s.version, "accent");
-
           const on = s.persona.enabled_sessions || 0;
           const off = s.persona.disabled_sessions || 0;
           setStat("s-persona", `${on} 开 / ${off} 关`, off ? "" : "ok");
-
           setStat("s-proactive", s.proactive.active ? "已开启" : "已关闭", s.proactive.active ? "ok" : "off");
           if (s.proactive.describe) $("proactive-detail").textContent = s.proactive.describe;
-
           setStat("s-vision", s.vision.enabled ? "已启用" : "未配置", s.vision.enabled ? "ok" : "off");
-          $("subtitle").title = `图片识别：${s.vision.model}`;
-
           setStat("s-stickers", `${s.stickers.count} 张`, "");
           $("stats").hidden = false;
           $("loading").hidden = true;
+
+          // 概率事件
+          $("p-night-prob").textContent = `${Math.round(s.proactive.night_prob * 100)}%（每晚）`;
+          $("p-day-prob").textContent = `${Math.round(s.proactive.day_prob * 100)}%（每天）`;
+          $("p-night-window").textContent = s.proactive.night_window;
+          $("p-day-window").textContent = s.proactive.day_window;
+          const plan = s.proactive.plan || {};
+          $("p-night-plan").textContent = plan.night_at ? `${plan.night_at} 发送` + (plan.sent_night ? "（已发）" : "（待发）") : "今日未安排";
+          $("p-day-plan").textContent = plan.day_at ? `${plan.day_at} 发送` + (plan.sent_day ? "（已发）" : "（待发）") : "今日未安排";
+          $("p-last-night").textContent = plan.last_night_at ? `${plan.last_night_at}：${plan.last_night_text || ""}` : "还没有";
+          $("p-last-day").textContent = plan.last_day_at ? `${plan.last_day_at}：${plan.last_day_text || ""}` : "还没有";
+          $("p-detail").textContent = plan.plan_date
+            ? `今日计划日期 ${plan.plan_date} · 已绑定 ${plan.targets} 个私聊会话`
+            : `已绑定 ${plan.targets} 个私聊会话`;
+
+          // 表情包管理
+          const st = s.stickers;
+          $("m-count").textContent = `${st.count} 张`;
+          $("m-tagged").textContent = `${st.tagged} 张（${st.count ? Math.round(st.tagged / st.count * 100) : 0}%）`;
+          const tagsHtml = (st.top_tags || [])
+            .map(([t, n]) => `<span class="tag">${t} ×${n}</span>`)
+            .join("");
+          $("m-tags").innerHTML = tagsHtml || "（无标签数据）";
+          $("m-boost").value = Math.round(st.boost_prob * 100);
+          $("m-boost-val").textContent = Math.round(st.boost_prob * 100) + "%";
+          $("m-rate-max").value = st.rate_max;
+          $("m-rate-window").value = st.rate_window;
+          $("m-save").disabled = false;
+          $("m-boost").addEventListener("input", () => {
+            $("m-boost-val").textContent = $("m-boost").value + "%";
+          });
+          $("m-save").addEventListener("click", async () => {
+            $("m-save").disabled = true;
+            $("m-save-msg").textContent = "保存中…";
+            try {
+              const res = await bridge.apiPost("config", {
+                boost_prob: Number($("m-boost").value) / 100,
+                rate_max: Number($("m-rate-max").value),
+                rate_window: Number($("m-rate-window").value),
+              });
+              $("m-save-msg").textContent = "已保存 ✓";
+            } catch (e) {
+              $("m-save-msg").textContent = "保存失败：" + (e && e.message ? e.message : e);
+            } finally {
+              $("m-save").disabled = false;
+            }
+          });
         } catch (e) {
           $("loading").hidden = true;
           const err = $("error");

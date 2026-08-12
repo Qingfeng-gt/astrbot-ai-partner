@@ -22,6 +22,7 @@ AstrBot 的 LLM 请求，使 bot 以憨憨的身份、记忆和说话方式回�
 """
 
 import asyncio
+import json
 import random
 from pathlib import Path
 from typing import Optional
@@ -40,13 +41,13 @@ from astrbot.api.message_components import Image, Plain
 from astrbot.api.platform import MessageType
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star
-from astrbot.api.web import json_response
+from astrbot.api.web import error_response, json_response, request
 
 from .core.memory_engine import MemoryEngine
 from .core.persona_loader import PersonaLoader
-from .core.proactive_sender import ProactiveSender
+from .core.proactive_sender import DAY_PROB, DAY_WINDOW, NIGHT_PROB, NIGHT_WINDOW, ProactiveSender
 from .core.reply_processor import parse_reply
-from .core.sticker_bot import StickerBot, ensure_sendable
+from .core.sticker_bot import StickerBot, ensure_sendable, infer_emotion
 from .core.vision import VisionEngine
 
 # 注入标记：用于防止重复注入
@@ -55,7 +56,13 @@ _SITUATION_MARK = "<!-- hanhan-situation -->"
 _PLUGIN_DIR = Path(__file__).parent
 # 插件名/版本（Web API 路由前缀与页面展示用，版本与 metadata.yaml 同步）
 _PLUGIN_NAME = "astrbot_plugin_hanhan"
-_PLUGIN_VERSION = "1.0.23"
+_PLUGIN_VERSION = "1.0.24"
+
+
+def _fmt_window(window: tuple[int, int]) -> str:
+    """把跨天绝对分钟窗口格式化为 '23:00 ~ 01:30' 样式。"""
+    lo, hi = window
+    return f"{lo % (24 * 60) // 60:02d}:{lo % 60:02d} ~ {hi % (24 * 60) // 60:02d}:{hi % 60:02d}"
 # 人格是否仅在私聊会话生效（前任人格在群里不合适，默认 True）
 _PERSONA_ONLY_PRIVATE = True
 
@@ -68,7 +75,16 @@ class HanhanPersonaPlugin(Star):
         self.persona_text = self.persona.load()
         # 传入人格文本：其中的【时间线】表是身份阶段推算的依据（时间不写死）
         self.memory = MemoryEngine(persona_text=self.persona_text)
-        self.stickers = StickerBot(_PLUGIN_DIR / "stickers")
+        # 表情包配置（sticker_config.json：多标签 + 补发概率 + 限频，页面可改）
+        self.sticker_cfg_file = _PLUGIN_DIR / "sticker_config.json"
+        scfg = self._load_sticker_config()
+        self.stickers = StickerBot(
+            _PLUGIN_DIR / "stickers",
+            rate_window=float(scfg.get("rate_window", 600)),
+            rate_max=int(scfg.get("rate_max", 4)),
+            boost_prob=float(scfg.get("boost_prob", 0.35)),
+            tags=scfg.get("tags") or {},
+        )
         # 主动消息：深夜语音/白天分享，随机时段（状态持久化在插件目录）
         self.proactive = ProactiveSender(
             context=self.context,
@@ -92,13 +108,52 @@ class HanhanPersonaPlugin(Star):
         )
         # 会话粒度开关：session_id -> bool（True 为注入人格）
         self.enabled_sessions: dict[str, bool] = {}
-        # 插件页面（WebUI pages/ 目录）调用的状态接口：路由必须带插件名前缀
+        # 插件页面（WebUI pages/ 目录）调用的接口：路由必须带插件名前缀
         self.context.register_web_api(
             f"/{_PLUGIN_NAME}/status",
             self.page_status,
             ["GET"],
             "憨憨插件实时状态（供插件页面调用）",
         )
+        self.context.register_web_api(
+            f"/{_PLUGIN_NAME}/config",
+            self.page_update_config,
+            ["POST"],
+            "更新憨憨表情包频率参数（供插件页面调用）",
+        )
+
+    def _load_sticker_config(self) -> dict:
+        """读 sticker_config.json；缺失/损坏时写默认并返回。"""
+        default = {
+            "boost_prob": 0.35,  # LLM 没标表情包时补发一张的概率
+            "rate_max": 4,  # 限频窗口内最多表情包数
+            "rate_window": 600,  # 限频窗口（秒）
+            "tags": {},  # 多标签：文件名 -> 标签列表（可覆盖自动推断）
+        }
+        try:
+            if self.sticker_cfg_file.exists():
+                data = json.loads(self.sticker_cfg_file.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    return data
+        except (OSError, ValueError):
+            logger.warning(f"[hanhan] sticker_config.json 解析失败，使用默认配置: {self.sticker_cfg_file}")
+        try:
+            self.sticker_cfg_file.write_text(
+                json.dumps(default, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except OSError as e:
+            logger.error(f"[hanhan] sticker_config.json 写入失败: {e}")
+        return default
+
+    def _save_sticker_config(self, cfg: dict) -> None:
+        try:
+            self.sticker_cfg_file.write_text(
+                json.dumps(cfg, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except OSError as e:
+            logger.error(f"[hanhan] sticker_config.json 保存失败: {e}")
 
     def _session_id(self, event: AstrMessageEvent) -> str:
         """获取会话标识（unified_msg_origin），兼容不同 AstrBot 版本。
@@ -258,11 +313,23 @@ class HanhanPersonaPlugin(Star):
         sid = self._session_id(event)
         self.memory.on_reply(sid, text)  # 检测"要去忙/睡了"等意图
 
+        # 补发表情包：LLM 这轮没标表情包时，按概率从回复文本推断情绪补一张
+        # （提升使用频率；限频时跳过，避免刷屏）
+        if (
+            not any(kind == "img" for kind, _ in parts)
+            and not self.stickers.is_rate_limited(sid)
+            and random.random() < self.stickers.boost_prob
+        ):
+            emotion = infer_emotion(text)
+            if emotion:
+                parts.append(("img", emotion))
+                logger.info(f"[hanhan] 补发表情包（文本情绪推断: {emotion}）")
+
         # 模拟真人节奏再回复：基础打字延迟 + 间隔越久越慢 + 说过要去忙则"忙完回来"
         await self._human_pause(sid)
 
         if len(parts) <= 1 and parts and parts[0][0] == "text":
-            # 单条纯文本：仅当去掉了结尾句号时才重写，否则交给默认流程
+            # 单条纯文本且未补发：仅当去掉了结尾句号时才重写，否则交给默认流程
             payload = parts[0][1]
             if payload == text.strip():
                 return
@@ -314,16 +381,66 @@ class HanhanPersonaPlugin(Star):
                 "proactive": {
                     "active": self.proactive.is_active(),
                     "describe": self.proactive.describe(),
+                    "night_prob": NIGHT_PROB,
+                    "day_prob": DAY_PROB,
+                    "night_window": _fmt_window(NIGHT_WINDOW),
+                    "day_window": _fmt_window(DAY_WINDOW),
+                    "plan": self.proactive.plan_info(),
                 },
                 "vision": {
                     "enabled": self.vision.enabled(),
                     "model": self.vision.model or "qwen-vl-plus（默认）",
                     "endpoint": self.vision.endpoint,
                 },
-                "stickers": {"count": sticker_count},
+                "stickers": {
+                    "count": sticker_count,
+                    "tagged": self.stickers._tagged_count(),
+                    "boost_prob": self.stickers.boost_prob,
+                    "rate_max": self.stickers.rate_max,
+                    "rate_window": self.stickers.rate_window,
+                    "top_tags": sorted(
+                        self.stickers._tag_stats().items(), key=lambda x: -x[1]
+                    )[:10],
+                },
                 "repo": "https://github.com/Qingfeng-gt/astrbot-ai-partner",
             }
         )
+
+    async def page_update_config(self) -> dict:
+        """插件页面配置接口：修改表情包频率参数（白名单字段，热生效并持久化）。"""
+        try:
+            data = await request.json(default={})
+        except Exception as e:
+            return error_response(f"请求体解析失败: {e}", status_code=400)
+        if not isinstance(data, dict):
+            return error_response("请求体必须是 JSON 对象", status_code=400)
+        cfg = self._load_sticker_config()
+        updated = {}
+        try:
+            if "boost_prob" in data:
+                v = float(data["boost_prob"])
+                if not 0 <= v <= 1:
+                    raise ValueError
+                cfg["boost_prob"], updated["boost_prob"] = v, v
+            if "rate_max" in data:
+                v = int(data["rate_max"])
+                if not 1 <= v <= 20:
+                    raise ValueError
+                cfg["rate_max"], updated["rate_max"] = v, v
+            if "rate_window" in data:
+                v = float(data["rate_window"])
+                if not 30 <= v <= 86400:
+                    raise ValueError
+                cfg["rate_window"], updated["rate_window"] = v, v
+        except (TypeError, ValueError):
+            return error_response("参数不合法（boost_prob 0~1，rate_max 1~20，rate_window 30~86400）", status_code=400)
+        # 热生效 + 持久化
+        self.stickers.boost_prob = float(cfg["boost_prob"])
+        self.stickers.rate_max = int(cfg["rate_max"])
+        self.stickers.rate_window = float(cfg["rate_window"])
+        self._save_sticker_config(cfg)
+        logger.info(f"[hanhan] 插件页面更新表情包参数: {updated}")
+        return json_response({"ok": True, **updated})
 
     # ---------- LLM 工具：表情包 ----------
 

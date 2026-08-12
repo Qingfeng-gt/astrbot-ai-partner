@@ -1,0 +1,12 @@
+{
+  "boost_prob": 0.35,
+  "rate_max": 4,
+  "rate_window": 600,
+  "tags": {
+    "blobcatwave.png": ["开心", "打招呼", "猫"],
+    "blobcatlove.png": ["爱你", "贴贴", "猫"],
+    "blobcatmelt.png": ["开心", "撒娇", "融化", "猫"],
+    "blobcatsnuggle.png": ["贴贴", "安慰", "抱抱", "猫"],
+    "blobcatheartbroken.png": ["心碎", "难过", "猫"]
+  }
+}

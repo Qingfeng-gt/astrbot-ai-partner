@@ -144,6 +144,24 @@ class ProactiveSender:
     def is_active(self) -> bool:
         return bool(self.state["active"])
 
+    def plan_info(self) -> dict:
+        """今日调度计划状态（供插件页面展示）：计划时刻、已发状态、上次内容。"""
+        fmt = lambda m: (  # noqa: E731
+            f"{m % (24 * 60) // 60:02d}:{m % 60:02d}" if isinstance(m, int) else None
+        )
+        return {
+            "plan_date": self.state.get("plan_date", ""),
+            "night_at": fmt(self.state.get("night_minute")),
+            "day_at": fmt(self.state.get("day_minute")),
+            "sent_night": bool(self.state.get("sent_night")),
+            "sent_day": bool(self.state.get("sent_day")),
+            "last_night_at": self.state.get("last_sent_night_at", ""),
+            "last_day_at": self.state.get("last_sent_day_at", ""),
+            "last_night_text": self.state.get("last_sent_night_text", ""),
+            "last_day_text": self.state.get("last_sent_day_text", ""),
+            "targets": len(self.state.get("targets", [])),
+        }
+
     def describe(self) -> str:
         """当前调度状态描述（含计划、已发状态、上次内容，用于 /憨憨主动状态）。"""
         if not self.state["active"]:
