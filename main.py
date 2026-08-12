@@ -28,6 +28,7 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.event.filter import (
     command,
+    llm_tool,
     on_astrbot_loaded,
     on_decorating_result,
     on_llm_request,
@@ -41,7 +42,7 @@ from .core.memory_engine import MemoryEngine
 from .core.persona_loader import PersonaLoader
 from .core.proactive_sender import ProactiveSender
 from .core.reply_processor import parse_reply
-from .core.sticker_bot import StickerBot
+from .core.sticker_bot import StickerBot, ensure_sendable
 
 # 注入标记：用于防止重复注入
 _PERSONA_MARK = "<!-- hanhan-persona -->"
@@ -71,12 +72,25 @@ class HanhanPersonaPlugin(Star):
         self.enabled_sessions: dict[str, bool] = {}
 
     def _session_id(self, event: AstrMessageEvent) -> str:
-        """获取会话标识，兼容不同 AstrBot 版本。"""
+        """获取会话标识（unified_msg_origin），兼容不同 AstrBot 版本。
+
+        优先用 event.unified_msg_origin；旧版没有该属性时，兜底拼出三段式
+        platform:message_type:session_id —— 主动消息 send_message 依赖此格式解析
+        （MessageSession.from_str 需要恰好三段，两段串会抛 ValueError）。
+        """
         unified = getattr(event, "unified_msg_origin", None)
         if unified:
             return unified
         sender = event.message_obj.sender
-        return f"{getattr(sender, 'platform', '')}:{getattr(sender, 'user_id', '')}"
+        try:
+            mtype = event.get_message_type()
+            mtype_str = getattr(mtype, "value", None) or str(mtype)
+        except Exception:
+            mtype_str = "FriendMessage"  # 兜底：拼不出消息类型时按私聊处理
+        return (
+            f"{getattr(sender, 'platform', '')}:{mtype_str}:"
+            f"{getattr(sender, 'user_id', '')}"
+        )
 
     def _persona_enabled(self, event: AstrMessageEvent) -> bool:
         return self.enabled_sessions.get(self._session_id(event), True)
@@ -164,12 +178,28 @@ class HanhanPersonaPlugin(Star):
                 if img is None:
                     logger.warning("[hanhan] stickers/ 文件夹为空或不存在，跳过表情包")
                     continue
-                await event.send(MessageChain().file_image(str(img)))
+                await event.send(MessageChain().file_image(str(ensure_sendable(img))))
                 self.stickers.record_used(sid, img.name)
                 self.stickers.record_sent(sid)
                 sent_sticker = True
             else:
                 await event.send(MessageChain().message(payload))
+
+    # ---------- LLM 工具：表情包 ----------
+
+    @llm_tool(name="send_hanhan_sticker")
+    async def send_hanhan_sticker(self, event: AstrMessageEvent, emotion: str):
+        """发送一张憨憨表情包（按情绪匹配，如开心、无语、生气时用）。
+
+        Args:
+            emotion(string): 情绪词，1-2 个字描述当前情绪，如：开心、无语、生气、害羞、难过、敷衍、疑问、亲亲、思考中。
+        """
+        sid = self._session_id(event)
+        img = self.stickers.pick(sid, (emotion or "").strip() or None)
+        if img is None:
+            yield event.plain_result("（stickers/ 文件夹没有可用表情包）")
+            return
+        yield event.image_result(str(ensure_sendable(img)))  # webp 转 png
 
     # ---------- 生命周期：主动调度 ----------
 
@@ -213,11 +243,12 @@ class HanhanPersonaPlugin(Star):
             if piece[0] == "text":
                 yield event.plain_result(piece[1])
             else:
+                # 预览时直接发出真实表情包图片（与被动回复同一套选图/转换逻辑）
                 img = self.stickers.pick(sid, piece[1])
-                if img:
-                    yield event.plain_result(f"表情包：{img.name}")
-                else:
+                if img is None:
                     yield event.plain_result("[表情包]（stickers/ 文件夹为空）")
+                else:
+                    yield event.image_result(str(ensure_sendable(img)))
 
     @command("憨憨开关")
     async def toggle_persona(self, event: AstrMessageEvent):

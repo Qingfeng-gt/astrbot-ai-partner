@@ -13,6 +13,30 @@ from typing import Optional
 
 STICKER_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 
+
+def ensure_sendable(path) -> "Path":
+    """把可能不受微信图片通道支持的格式（webp）转为 png；失败时原样返回。
+
+    转换产物缓存到原目录下 .media_cache/，避免重复转换。
+    """
+    p = Path(path)
+    if p.suffix.lower() != ".webp":
+        return p
+    try:
+        from PIL import Image as PILImage
+    except ImportError:
+        return p
+    try:
+        cache_dir = p.parent / ".media_cache"
+        cache_dir.mkdir(exist_ok=True)
+        out = cache_dir / f"{p.stem}.png"
+        if not out.exists():
+            with PILImage.open(p) as im:
+                im.convert("RGBA").save(out, "PNG")
+        return out
+    except Exception:
+        return p
+
 # 情绪词 → 文件名关键词候选（按序尝试，第一个有命中的集合里随机抽）
 EMOTION_TO_KEYWORDS: dict[str, list[str]] = {
     "开心": ["开心", "扭一扭", "哈哈"],

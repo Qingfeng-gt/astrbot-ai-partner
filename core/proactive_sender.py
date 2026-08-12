@@ -5,6 +5,7 @@
 - 消息内容由 LLM 按人格生成（失败时用内置兜底句）
 - 目标会话自动记录（用户私聊过即记住），也可用 /憨憨绑定 手动指定
 - 状态持久化到插件目录 proactive_state.json，重启不丢
+- 发送失败自动重试（上限 3 次），全部失败在状态里记录错误，不谎报"已发送"
 """
 
 import asyncio
@@ -19,7 +20,7 @@ from astrbot.api import logger
 from astrbot.api.event import MessageChain
 
 from .reply_processor import parse_reply
-from .sticker_bot import StickerBot
+from .sticker_bot import StickerBot, ensure_sendable
 
 # 深夜窗口：23:00 ~ 次日 01:30（用跨天的绝对分钟数表示，1440 = 次日 00:00）
 NIGHT_WINDOW = (23 * 60, 25 * 60 + 30)
@@ -28,6 +29,7 @@ DAY_WINDOW = (12 * 60, 22 * 60)
 NIGHT_PROB = 0.3  # 每晚主动联系的概率（低频，回避型人设不会天天找）
 DAY_PROB = 0.1  # 每天白天主动分享的概率
 LOOP_INTERVAL = 60  # 调度检查间隔（秒）
+MAX_SEND_RETRIES = 3  # 单轮主动消息最多重试次数，超过后放弃（避免坏目标每 60s 刷日志/重复烧 LLM）
 
 # 兜底句（LLM 生成失败时使用），保持人格安全
 CANNED = {
@@ -52,6 +54,21 @@ def _cur_minute(dt: datetime) -> int:
     if dt.hour < 2:
         m += 24 * 60
     return m
+
+
+def _pick_future_minute(window: tuple[int, int], cur: int, prob: float) -> Optional[int]:
+    """按概率决定是否安排；安排时只在窗口"尚未过去"的部分里随机选一个未来时刻。
+
+    若窗口已完全过去（如白天计划在 22:00 后才生成），返回 None。
+    cur 为当前的绝对分钟数。
+    """
+    if random.random() >= prob:
+        return None
+    lo, hi = window
+    lo = max(lo, cur + 1)  # 至少 1 分钟后，保证不会"生成即触发"
+    if lo > hi:
+        return None
+    return random.randint(lo, hi)
 
 
 class ProactiveSender:
@@ -139,17 +156,25 @@ class ProactiveSender:
         if nm is not None:
             # 跨天窗口的分钟数（>=1440）取模归一化到次日 00:00 之后
             hh, mm = (nm % (24 * 60)) // 60, nm % 60
-            if self.state["sent_night"]:
-                at = self.state.get("last_sent_night_at", "?")
+            at = self.state.get("last_sent_night_at")
+            if self.state["sent_night"] and at:
                 parts.append(f"今晚深夜消息已发送（{at}）")
+            elif self.state["sent_night"]:
+                parts.append(
+                    f"今晚深夜消息发送失败已放弃（{self.state.get('last_night_error', '?')}）"
+                )
             else:
                 parts.append(f"今晚深夜计划 ~{hh:02d}:{mm:02d} 触发")
         else:
             parts.append("今晚深夜无计划（低频随机）")
         if self.state["day_minute"] is not None:
-            if self.state["sent_day"]:
-                at = self.state.get("last_sent_day_at", "?")
+            at = self.state.get("last_sent_day_at")
+            if self.state["sent_day"] and at:
                 parts.append(f"今天白天消息已发送（{at}）")
+            elif self.state["sent_day"]:
+                parts.append(
+                    f"今天白天消息发送失败已放弃（{self.state.get('last_day_error', '?')}）"
+                )
             else:
                 hh, mm = self.state["day_minute"] // 60, self.state["day_minute"] % 60
                 parts.append(f"今天白天计划 ~{hh:02d}:{mm:02d} 触发")
@@ -182,15 +207,11 @@ class ProactiveSender:
             self._task = None
             logger.info("[hanhan] 主动消息调度已停止")
 
-    def _plan_day(self, date_str: str) -> None:
-        """为新的一天生成随机调度计划（按概率决定是否安排）。"""
+    def _plan_day(self, date_str: str, cur: int) -> None:
+        """为新的一天生成随机调度计划（按概率决定是否安排，只选窗口内的未来时刻）。"""
         self.state["plan_date"] = date_str
-        self.state["night_minute"] = (
-            random.randint(*NIGHT_WINDOW) if random.random() < NIGHT_PROB else None
-        )
-        self.state["day_minute"] = (
-            random.randint(*DAY_WINDOW) if random.random() < DAY_PROB else None
-        )
+        self.state["night_minute"] = _pick_future_minute(NIGHT_WINDOW, cur, NIGHT_PROB)
+        self.state["day_minute"] = _pick_future_minute(DAY_WINDOW, cur, DAY_PROB)
         self.state["sent_night"] = False
         self.state["sent_day"] = False
         self._save_state()
@@ -207,25 +228,21 @@ class ProactiveSender:
                     await asyncio.sleep(LOOP_INTERVAL)
                     continue
                 today = now.strftime("%Y-%m-%d")
-                if self.state["plan_date"] != today and now.hour >= 2:
-                    self._plan_day(today)
                 cur = _cur_minute(now)
+                if self.state["plan_date"] != today and now.hour >= 2:
+                    self._plan_day(today, cur)
                 if (
                     not self.state["sent_night"]
                     and self.state["night_minute"] is not None
                     and cur >= self.state["night_minute"]
                 ):
-                    await self._send("night")
-                    self.state["sent_night"] = True
-                    self._save_state()
+                    await self._try_send("night")
                 if (
                     not self.state["sent_day"]
                     and self.state["day_minute"] is not None
                     and cur >= self.state["day_minute"]
                 ):
-                    await self._send("day")
-                    self.state["sent_day"] = True
-                    self._save_state()
+                    await self._try_send("day")
             except asyncio.CancelledError:
                 raise
             except BaseException:
@@ -234,14 +251,41 @@ class ProactiveSender:
 
     # ---------- 发送 ----------
 
-    async def _send(self, kind: str) -> None:
-        text = await self._generate_text(kind)
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-        self.state[f"last_sent_{kind}_at"] = now_str
-        self.state[f"last_sent_{kind}_text"] = text
+    async def _try_send(self, kind: str) -> None:
+        """触发一次主动发送；失败累计重试，超过上限放弃（防止坏目标每 60s 刷错误）。"""
+        ok = await self._send(kind)
+        if ok:
+            self.state[f"sent_{kind}"] = True
+            self.state[f"last_{kind}_failures"] = 0
+        else:
+            failures = self.state.get(f"last_{kind}_failures", 0) + 1
+            self.state[f"last_{kind}_failures"] = failures
+            if failures >= MAX_SEND_RETRIES:
+                self.state[f"sent_{kind}"] = True  # 放弃本轮，次日再重新计划
+                logger.error(
+                    f"[hanhan] 主动消息({kind})连续 {failures} 次发送失败，已放弃本轮重试"
+                )
         self._save_state()
-        for target in list(self.state["targets"]):
+
+    async def _send(self, kind: str) -> bool:
+        """生成并发送主动消息；任一目标送达即视为成功（失败的不再重复打扰已送达的目标）。"""
+        text = await self._generate_text(kind)
+        results = [
             await self._send_text(target, text)
+            for target in list(self.state["targets"])
+        ]
+        self.state[f"last_{kind}_text"] = text
+        if any(results):
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+            self.state[f"last_sent_{kind}_at"] = now_str
+            self.state[f"last_sent_{kind}_text"] = text
+            self.state[f"last_{kind}_error"] = ""
+            self._save_state()
+            return True
+        failed = [t for t, ok in zip(self.state["targets"], results) if not ok]
+        self.state[f"last_{kind}_error"] = f"全部 {len(failed)} 个目标均未送达"
+        self._save_state()
+        return False
 
     async def _generate_text(self, kind: str) -> str:
         """按人格生成主动消息；LLM 不可用或失败时用兜底句。"""
@@ -250,15 +294,21 @@ class ProactiveSender:
         now_str = datetime.now().strftime("%H:%M")
         if kind == "night":
             task = (
-                f"现在是深夜 {now_str}。你睡不着（或刚洗完澡、或突然想起他），想给他发条消息。"
-                "用文字发，不用刻意装成语音；1-2 条短消息，迂回、不加句号。"
-                "情绪特别到位（想他、有点脆弱、被逗笑）时才用 [表情包:情绪词]，平时纯文字就好。"
+                f"现在是深夜 {now_str}，你还没睡，想给他发条消息。"
+                "就像真的在微信里给前任发消息：1-2 句，口语化，想到哪说到哪，"
+                "可以说自己睡不着、刚洗完澡、或者今天发生的小事。"
+                "禁忌：不要文艺腔、不要绕弯子玩梗（绝对不能说'有点想你写的排序算法'这类硬编的话）、"
+                "不要'你最近怎么样''最近忙吗''在吗'这种客套开场，不要解释自己为什么发消息。"
+                "情绪特别到位（想他、有点脆弱、被逗笑）时才用 [表情包:情绪词]，平时纯文字。"
                 "直接输出消息内容，不要任何解释或前缀。"
             )
         else:
             task = (
-                f"现在是白天 {now_str}。你看到/想到个东西（视频、趣事、或者找工作的事），主动给他分享一条。"
-                "短、口语化、不加句号。情绪丰富时用一个 [表情包:情绪词]，一般纯文字就好。"
+                f"现在是白天 {now_str}，你刷到/想到个有意思的东西，随手分享给他。"
+                "就像真的在微信里给人分享：1-2 句，口语化，可以吐槽、可以大笑，"
+                "别用'刚刚看到一个视频''跟你说个事'这种开场白，别 AI 腔。"
+                "分享视频/图片时直接文字描述内容即可，不要输出 [视频] 这类标记。"
+                "情绪丰富时用一个 [表情包:情绪词]，一般纯文字就好。"
                 "直接输出消息内容，不要解释。"
             )
         provider = None
@@ -275,25 +325,71 @@ class ProactiveSender:
                 prompt=task,
                 system_prompt=self.persona_text or None,
             )
-            text = (resp or "").strip()
+            text = self._response_to_text(resp)
             if text:
                 return text
         except BaseException as e:
             logger.error(f"[hanhan] 主动消息生成失败: {e}")
         return random.choice(CANNED[kind])
 
-    async def _send_text(self, target: str, text: str) -> None:
-        """按人格解析文本并逐条发送（分条 + 表情包）。"""
-        for kind, payload in parse_reply(text):
+    @staticmethod
+    def _response_to_text(resp) -> str:
+        """从 text_chat 返回值提取纯文本。
+
+        v4 的 text_chat 返回 LLMResponse 对象（不是字符串）：
+        优先 result_chain（消息链），其次 completion_text / _completion_text。
+        """
+        if isinstance(resp, str):
+            return resp.strip()
+        if resp is None:
+            return ""
+        chain = getattr(resp, "result_chain", None)
+        if chain is not None:
+            text = "".join(
+                getattr(c, "text", "") for c in getattr(chain, "chain", [])
+            )
+            if text.strip():
+                return text.strip()
+        return (
+            getattr(resp, "completion_text", None)
+            or getattr(resp, "_completion_text", "")
+            or ""
+        ).strip()
+
+    async def _send_text(self, target: str, text: str) -> bool:
+        """按人格解析文本并逐条发送（分条 + 表情包）；返回该目标是否至少送达一条。"""
+        parts = parse_reply(text)
+        if not parts:
+            logger.warning(f"[hanhan] 主动消息内容为空，跳过目标: {target}")
+            return True  # 没有可发送的内容不算失败，避免空转重试
+        sent_any = False
+        for kind, payload in parts:
             if kind == "img":
                 img = self.stickers.pick(target, payload)
                 if img is None:
+                    logger.warning(f"[hanhan] 主动消息表情包缺失: {payload!r}")
                     continue
-                ok = await self.context.send_message(
-                    target, MessageChain().file_image(str(img))
-                )
+                img = ensure_sendable(img)  # webp 转 png，保证微信图片通道可识别
+                logger.info(f"[hanhan] 主动消息发送表情包: {img.name}")
+                self.stickers.record_used(target, img.name)  # 与被动回复一致，防连发同一张
+                ok = await self._safe_send(target, MessageChain().file_image(str(img)))
             else:
-                ok = await self.context.send_message(target, MessageChain().message(payload))
-            if not ok:
-                logger.warning(f"[hanhan] 主动消息发送失败（平台未找到）: {target}")
-                return
+                logger.info(f"[hanhan] 主动消息发送文字: {payload[:20]}")
+                ok = await self._safe_send(target, MessageChain().message(payload))
+            sent_any = sent_any or ok
+        return sent_any
+
+    async def _safe_send(self, target: str, chain: MessageChain) -> bool:
+        """向一个目标发送一条消息；会话格式非法或发送异常时记录日志并跳过，不影响其余目标。
+
+        对应官方文档的主动消息接口：self.context.send_message(unified_msg_origin, chains)。
+        返回 True 只表示找到了匹配的平台（适配器是否真正送达由平台实现决定）。
+        """
+        try:
+            return bool(await self.context.send_message(target, chain))
+        except ValueError as e:
+            logger.warning(f"[hanhan] 主动消息目标会话格式非法，已跳过: {target} → {e}")
+            return False
+        except Exception as e:
+            logger.warning(f"[hanhan] 主动消息发送异常，已跳过: {target} → {e}")
+            return False
