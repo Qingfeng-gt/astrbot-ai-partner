@@ -17,7 +17,7 @@ desc: |
 
   ## 安装
   将本文件夹复制到 AstrBot 插件目录（data/plugins/ 或 addons/），或在 WebUI 插件管理安装本压缩包，然后重载插件。
-version: 1.0.11
+version: 1.0.12
 author: Qingfeng-gt
 repo: https://github.com/Qingfeng-gt/astrbot-ai-partner
 tags:
