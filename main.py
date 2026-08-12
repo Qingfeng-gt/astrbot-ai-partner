@@ -55,7 +55,7 @@ _SITUATION_MARK = "<!-- hanhan-situation -->"
 _PLUGIN_DIR = Path(__file__).parent
 # 插件名/版本（Web API 路由前缀与页面展示用，版本与 metadata.yaml 同步）
 _PLUGIN_NAME = "astrbot_plugin_hanhan"
-_PLUGIN_VERSION = "1.0.22"
+_PLUGIN_VERSION = "1.0.23"
 # 人格是否仅在私聊会话生效（前任人格在群里不合适，默认 True）
 _PERSONA_ONLY_PRIVATE = True
 

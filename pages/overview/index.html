@@ -157,8 +157,7 @@
       </footer>
     </div>
 
-    <script>
-      const bridge = window.AstrBotPluginPage;
+    <script type="module">
       const $ = (id) => document.getElementById(id);
 
       function setStat(id, text, cls) {
@@ -167,7 +166,22 @@
         if (cls) el.className = "value " + cls;
       }
 
+      // bridge SDK 由 AstrBot 在服务端重写 HTML 时注入到 </body> 前（普通脚本）；
+      // 本脚本用 type="module"（延迟到解析完成后执行，排在注入脚本之后），
+      // 再轮询兜底，确保 window.AstrBotPluginPage 一定已就绪。
+      async function waitForBridge(timeoutMs = 6000) {
+        const start = Date.now();
+        while (!window.AstrBotPluginPage) {
+          if (Date.now() - start > timeoutMs) {
+            throw new Error("bridge SDK 未注入（页面脚本早于 SDK 执行）");
+          }
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        return window.AstrBotPluginPage;
+      }
+
       (async () => {
+        const bridge = await waitForBridge();
         try {
           const ctx = await bridge.ready();
           if (ctx.pageTitle) $("title").textContent = ctx.pageTitle;
