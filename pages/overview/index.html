@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>憨憨 · 插件状态</title>
+    <style>
+      :root {
+        --bg: #f6f7f9;
+        --card: #ffffff;
+        --border: #e5e7eb;
+        --text: #1f2328;
+        --muted: #6b7280;
+        --accent: #f472b6;
+        --accent-soft: #fce7f3;
+        --ok: #16a34a;
+        --ok-soft: #dcfce7;
+        --off: #9ca3af;
+        --off-soft: #f3f4f6;
+        --code-bg: #f3f4f6;
+        --radius: 12px;
+      }
+      html[data-theme="dark"] {
+        --bg: #111318;
+        --card: #1a1d24;
+        --border: #2c313b;
+        --text: #e5e7eb;
+        --muted: #9ca3af;
+        --accent-soft: #3b1d2d;
+        --ok: #4ade80;
+        --ok-soft: #12351f;
+        --off-soft: #262a33;
+        --code-bg: #262a33;
+      }
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body {
+        font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        line-height: 1.6;
+        padding: 24px 16px 48px;
+      }
+      .wrap { max-width: 720px; margin: 0 auto; }
+      header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; }
+      .avatar {
+        width: 44px; height: 44px; border-radius: 12px;
+        background: linear-gradient(135deg, #f9a8d4, #f472b6);
+        display: flex; align-items: center; justify-content: center;
+        font-size: 24px; color: #fff; flex-shrink: 0;
+      }
+      h1 { font-size: 20px; font-weight: 600; }
+      .sub { color: var(--muted); font-size: 13px; margin-bottom: 18px; }
+      .badge {
+        display: inline-block; padding: 2px 10px; border-radius: 999px;
+        font-size: 12px; font-weight: 500;
+      }
+      .badge.on { background: var(--ok-soft); color: var(--ok); }
+      .badge.ver { background: var(--accent-soft); color: var(--accent); }
+      .card {
+        background: var(--card); border: 1px solid var(--border);
+        border-radius: var(--radius); padding: 16px 18px; margin-bottom: 14px;
+      }
+      .card h2 {
+        font-size: 14px; font-weight: 600; color: var(--muted);
+        letter-spacing: 0.5px; margin-bottom: 12px;
+      }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+      .stat {
+        border: 1px solid var(--border); border-radius: 10px;
+        padding: 12px 14px; background: var(--bg);
+      }
+      .stat .label { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+      .stat .value { font-size: 18px; font-weight: 600; }
+      .stat .value.ok { color: var(--ok); }
+      .stat .value.off { color: var(--off); }
+      .stat .value.accent { color: var(--accent); }
+      table { width: 100%; border-collapse: collapse; font-size: 13px; }
+      th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); }
+      th { color: var(--muted); font-weight: 500; width: 38%; }
+      tr:last-child td, tr:last-child th { border-bottom: none; }
+      code {
+        background: var(--code-bg); border-radius: 6px; padding: 1px 7px;
+        font-size: 12.5px; font-family: "Cascadia Code", Consolas, monospace;
+      }
+      .desc { font-size: 13.5px; color: var(--text); white-space: pre-line; }
+      .muted { color: var(--muted); font-size: 12.5px; }
+      footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 20px; }
+      footer a { color: var(--accent); text-decoration: none; }
+      .error {
+        border: 1px solid #fca5a5; background: #fef2f2; color: #b91c1c;
+        border-radius: 10px; padding: 12px 14px; font-size: 13px; margin-bottom: 14px;
+      }
+      html[data-theme="dark"] .error { background: #3b1212; border-color: #7f1d1d; color: #fca5a5; }
+      .loading { color: var(--muted); font-size: 13px; padding: 8px 2px; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        <div class="avatar">🐱</div>
+        <div>
+          <h1 id="title">憨憨</h1>
+          <div class="sub" id="subtitle">前任人格插件 · 正在加载状态…</div>
+        </div>
+      </header>
+
+      <div id="error" class="error" hidden></div>
+
+      <div class="card">
+        <h2>实时状态</h2>
+        <div class="loading" id="loading">加载中…</div>
+        <div id="stats" hidden>
+          <div class="grid">
+            <div class="stat">
+              <div class="label">插件版本</div>
+              <div class="value accent" id="s-version">—</div>
+            </div>
+            <div class="stat">
+              <div class="label">人格会话</div>
+              <div class="value" id="s-persona">—</div>
+            </div>
+            <div class="stat">
+              <div class="label">主动消息</div>
+              <div class="value" id="s-proactive">—</div>
+            </div>
+            <div class="stat">
+              <div class="label">图片识别</div>
+              <div class="value" id="s-vision">—</div>
+            </div>
+            <div class="stat">
+              <div class="label">表情包</div>
+              <div class="value" id="s-stickers">—</div>
+            </div>
+          </div>
+          <p class="muted" id="proactive-detail" style="margin-top: 10px"></p>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>使用指南</h2>
+        <table>
+          <tr><th><code>/憨憨开关</code></th><td>切换本会话人格开关</td></tr>
+          <tr><th><code>/憨憨状态</code></th><td>查看当前会话开关</td></tr>
+          <tr><th><code>/憨憨主动</code></th><td>切换主动消息（深夜/白天）</td></tr>
+          <tr><th><code>/憨憨主动状态</code></th><td>查看调度与已发状态</td></tr>
+          <tr><th><code>/憨憨主动测试</code></th><td>预览她此刻会主动说什么</td></tr>
+        </table>
+      </div>
+
+      <div class="card">
+        <h2>她是憨憨</h2>
+        <div class="desc" id="persona-desc"></div>
+      </div>
+
+      <footer>
+        作者 Qingfeng-gt · <a id="repo" href="https://github.com/Qingfeng-gt/astrbot-ai-partner" target="_blank" rel="noopener">GitHub 仓库</a>
+      </footer>
+    </div>
+
+    <script>
+      const bridge = window.AstrBotPluginPage;
+      const $ = (id) => document.getElementById(id);
+
+      function setStat(id, text, cls) {
+        const el = $(id);
+        el.textContent = text;
+        if (cls) el.className = "value " + cls;
+      }
+
+      (async () => {
+        try {
+          const ctx = await bridge.ready();
+          if (ctx.pageTitle) $("title").textContent = ctx.pageTitle;
+        } catch (e) {
+          // 上下文拿不到也无妨，页面静态内容照常展示
+        }
+
+        try {
+          const s = await bridge.apiGet("status");
+          $("subtitle").textContent = `${s.name} · v${s.version}`;
+          $("error").hidden = true;
+
+          setStat("s-version", "v" + s.version, "accent");
+
+          const on = s.persona.enabled_sessions || 0;
+          const off = s.persona.disabled_sessions || 0;
+          setStat("s-persona", `${on} 开 / ${off} 关`, off ? "" : "ok");
+
+          setStat("s-proactive", s.proactive.active ? "已开启" : "已关闭", s.proactive.active ? "ok" : "off");
+          if (s.proactive.describe) $("proactive-detail").textContent = s.proactive.describe;
+
+          setStat("s-vision", s.vision.enabled ? "已启用" : "未配置", s.vision.enabled ? "ok" : "off");
+          $("subtitle").title = `图片识别：${s.vision.model}`;
+
+          setStat("s-stickers", `${s.stickers.count} 张`, "");
+          $("stats").hidden = false;
+          $("loading").hidden = true;
+        } catch (e) {
+          $("loading").hidden = true;
+          const err = $("error");
+          err.hidden = false;
+          err.textContent = "状态加载失败：" + (e && e.message ? e.message : e) + "（页面静态内容不受影响）";
+        }
+
+        $("persona-desc").textContent =
+          "大学同班同学、前任。学习优先的学霸，表达感情全靠迂回——" +
+          "约你去图书馆却只要你在旁边，深夜会发语音，分手后说做朋友继续分享日常。\n" +
+          "收到图片会自动识别内容（百炼多模态），她会自然地接住话题。";
+      })();
+    </script>
+  </body>
+</html>

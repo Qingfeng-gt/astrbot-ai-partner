@@ -40,6 +40,7 @@ from astrbot.api.message_components import Image, Plain
 from astrbot.api.platform import MessageType
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star
+from astrbot.api.web import json_response
 
 from .core.memory_engine import MemoryEngine
 from .core.persona_loader import PersonaLoader
@@ -52,6 +53,9 @@ from .core.vision import VisionEngine
 _PERSONA_MARK = "<!-- hanhan-persona -->"
 _SITUATION_MARK = "<!-- hanhan-situation -->"
 _PLUGIN_DIR = Path(__file__).parent
+# 插件名/版本（Web API 路由前缀与页面展示用，版本与 metadata.yaml 同步）
+_PLUGIN_NAME = "astrbot_plugin_hanhan"
+_PLUGIN_VERSION = "1.0.22"
 # 人格是否仅在私聊会话生效（前任人格在群里不合适，默认 True）
 _PERSONA_ONLY_PRIVATE = True
 
@@ -88,6 +92,13 @@ class HanhanPersonaPlugin(Star):
         )
         # 会话粒度开关：session_id -> bool（True 为注入人格）
         self.enabled_sessions: dict[str, bool] = {}
+        # 插件页面（WebUI pages/ 目录）调用的状态接口：路由必须带插件名前缀
+        self.context.register_web_api(
+            f"/{_PLUGIN_NAME}/status",
+            self.page_status,
+            ["GET"],
+            "憨憨插件实时状态（供插件页面调用）",
+        )
 
     def _session_id(self, event: AstrMessageEvent) -> str:
         """获取会话标识（unified_msg_origin），兼容不同 AstrBot 版本。
@@ -276,6 +287,43 @@ class HanhanPersonaPlugin(Star):
                 sent_sticker = True
             else:
                 await event.send(MessageChain().message(payload))
+
+    # ---------- 插件页面（WebUI）接口 ----------
+
+    async def page_status(self) -> dict:
+        """插件页面状态接口：返回憨憨的实时运行状态（只读）。
+
+        路由 /astrbot_plugin_hanhan/status 在 __init__ 中注册，由
+        pages/overview/index.html 通过 bridge.apiGet("status") 调用。
+        """
+        try:
+            sticker_count = len(self.stickers._all_files())
+        except Exception:
+            sticker_count = 0
+        enabled_cnt = sum(1 for v in self.enabled_sessions.values() if v)
+        disabled_cnt = sum(1 for v in self.enabled_sessions.values() if not v)
+        return json_response(
+            {
+                "name": _PLUGIN_NAME,
+                "version": _PLUGIN_VERSION,
+                "persona": {
+                    "default_enabled": True,
+                    "enabled_sessions": enabled_cnt,
+                    "disabled_sessions": disabled_cnt,
+                },
+                "proactive": {
+                    "active": self.proactive.is_active(),
+                    "describe": self.proactive.describe(),
+                },
+                "vision": {
+                    "enabled": self.vision.enabled(),
+                    "model": self.vision.model or "qwen-vl-plus（默认）",
+                    "endpoint": self.vision.endpoint,
+                },
+                "stickers": {"count": sticker_count},
+                "repo": "https://github.com/Qingfeng-gt/astrbot-ai-partner",
+            }
+        )
 
     # ---------- LLM 工具：表情包 ----------
 
