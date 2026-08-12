@@ -94,6 +94,7 @@ class MemoryEngine:
         self.last_user_time: dict[str, float] = {}
         self.last_reply_time: dict[str, float] = {}
         self.busy_until: dict[str, float] = {}
+        self.busy_pending: dict[str, bool] = {}  # 她说去忙后、还没"忙完回来"的会话
 
     def _current_stage(self, now_dt: datetime) -> str:
         """取当前时间与人格提示词时间表比较，得到她当下的身份阶段。"""
@@ -108,10 +109,32 @@ class MemoryEngine:
 
     def on_reply(self, session_id: str, text: str) -> None:
         """记录回复；若她说要去忙/睡了（排除"陪我去图书馆"这类邀约），
-        接下来一段时间回复节奏变慢。"""
+        下一轮回复节奏变慢（"忙完回来"）。"""
         self.last_reply_time[session_id] = time.time()
         if _BUSY_RE.search(text) and not _INVITE_RE.search(text):
             self.busy_until[session_id] = time.time() + _BUSY_WINDOW
+            self.busy_pending[session_id] = True
+
+    def take_busy_pause(self, session_id: str) -> bool:
+        """她说去忙后、还没慢回复过，消费这一次"忙完回来"的慢节奏。"""
+        if (
+            self.busy_pending.get(session_id, False)
+            and self.busy_until.get(session_id, 0) > time.time()
+        ):
+            self.busy_pending[session_id] = False
+            return True
+        return False
+
+    def gap_seconds(self, session_id: str) -> Optional[float]:
+        """距她上次回复/用户上条消息的时间（秒）；无记录返回 None。"""
+        now = time.time()
+        last_reply = self.last_reply_time.get(session_id)
+        last_user = self.last_user_time.get(session_id)
+        if last_reply is not None:
+            return now - last_reply
+        if last_user is not None:
+            return now - last_user
+        return None
 
     def trim_contexts(self, contexts: list) -> tuple[list, bool]:
         """截断过长上下文（遗忘机制）；返回 (截断后列表, 是否发生截断)。"""

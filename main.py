@@ -21,6 +21,8 @@ AstrBot 的 LLM 请求，使 bot 以憨憨的身份、记忆和说话方式回�
   私聊判断需在函数内部完成；流式输出时装饰阶段不生效
 """
 
+import asyncio
+import random
 from pathlib import Path
 from typing import Optional
 
@@ -32,8 +34,9 @@ from astrbot.api.event.filter import (
     on_astrbot_loaded,
     on_decorating_result,
     on_llm_request,
+    regex,
 )
-from astrbot.api.message_components import Plain
+from astrbot.api.message_components import Image, Plain
 from astrbot.api.platform import MessageType
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star
@@ -43,6 +46,7 @@ from .core.persona_loader import PersonaLoader
 from .core.proactive_sender import ProactiveSender
 from .core.reply_processor import parse_reply
 from .core.sticker_bot import StickerBot, ensure_sendable
+from .core.vision import VisionEngine
 
 # 注入标记：用于防止重复注入
 _PERSONA_MARK = "<!-- hanhan-persona -->"
@@ -67,6 +71,20 @@ class HanhanPersonaPlugin(Star):
             persona_text=self.persona_text,
             sticker_bot=self.stickers,
             state_file=_PLUGIN_DIR / "proactive_state.json",
+        )
+        # 图片识别：百炼多模态（配置了 API Key 才启用），让她"看到"用户发的图
+        # key 来源：环境变量 HANHAN_BAILIAN_API_KEY > WebUI 插件配置 > 插件目录 bailian.key
+        self.vision = VisionEngine(
+            api_key=(self.config or {}).get("bailian_api_key", ""),
+            endpoint=(self.config or {}).get("bailian_endpoint", ""),
+            model=(self.config or {}).get("bailian_model", ""),
+            key_file=str(_PLUGIN_DIR / "bailian.key"),
+        )
+        # 诊断：加载时确认识别是否启用（环境变量需在 AstrBot 进程启动前设置）
+        logger.info(
+            "[hanhan] 图片识别"
+            + ("已启用（环境变量 HANHAN_BAILIAN_API_KEY）" if self.vision.enabled() else "未启用：环境变量 HANHAN_BAILIAN_API_KEY 未读到")
+            + f"，端点={self.vision.endpoint}"
         )
         # 会话粒度开关：session_id -> bool（True 为注入人格）
         self.enabled_sessions: dict[str, bool] = {}
@@ -102,6 +120,28 @@ class HanhanPersonaPlugin(Star):
         except Exception:
             return False
 
+    async def _human_pause(self, sid: str) -> None:
+        """模拟真人回复节奏：看完消息 + 打字 + 情境延迟，避免秒回露出 AI 味。
+
+        - 基础：随机 1.5~4s（看消息、打字）
+        - 她说过要去忙/睡：下一轮"丢失"20~60s 再回（忙完才看到），只慢一次
+        - 隔得越久回得越慢：30min+ 附加 2~5s；2h+ 附加 4~9s；12h+ 附加 6~15s
+        - 总延迟封顶 120s，避免像卡死
+        """
+        delay = 0.0
+        if self.memory.take_busy_pause(sid):
+            delay = random.uniform(20, 60)  # 她说去忙了，这一轮"忙完回来"
+        else:
+            delay = random.uniform(1.5, 4.0)
+            gap = self.memory.gap_seconds(sid) or 0.0
+            if gap > 12 * 3600:
+                delay += random.uniform(6, 15)  # 隔了很久，像刚想起来回
+            elif gap > 2 * 3600:
+                delay += random.uniform(4, 9)
+            elif gap > 30 * 60:
+                delay += random.uniform(2, 5)
+        await asyncio.sleep(min(delay, 120.0))
+
     # ---------- LLM 请求钩子：人格 + 情景感知 ----------
 
     @on_llm_request()
@@ -133,6 +173,55 @@ class HanhanPersonaPlugin(Star):
         if situation:
             req.system_prompt = f"{req.system_prompt}\n{_SITUATION_MARK}\n{situation}"
 
+    @regex(r"[\s\S]*")
+    async def capture_vision(self, event: AstrMessageEvent) -> None:
+        """消息过滤器阶段（所有消息都经过，包括 agent 的 follow-up 消息）：
+        检测用户消息里的图片，调百炼识别后把描述写回消息链。
+
+        v4.2x 的 agent 模式下图片消息可能作为 follow-up 并入进行中的 agent run，
+        不触发 on_llm_request——所以在更早的 filter 阶段处理，保证 agent 无论哪轮都能看到描述。
+        """
+        if not self.vision.enabled():
+            return
+        if _PERSONA_ONLY_PRIVATE and not self._is_private(event):
+            return
+        imgs = [
+            c for c in event.message_obj.message
+            if isinstance(c, Image) and (c.file or c.url or c.path)
+        ]
+        if not imgs:
+            return
+        logger.info(
+            f"[hanhan] 消息过滤器捕获图片消息: 组件 {len(event.message_obj.message)} 个, "
+            f"图片 {len(imgs)} 个, 来源 file={getattr(imgs[0], 'file', '')!r:.60}"
+        )
+        desc = await self.vision.describe(imgs)
+        # 把 Image 组件替换成含描述的文本：v4.2x agent 对图片消息只认 Image 组件
+        # （会尝试 file_read_tool 读图，deepseek 无视觉→空回复），不会读附加文本；
+        # 换成文本后 agent 的消息里只有描述，必能正常回答。
+        # 识别失败也替换为 "[图片]" 占位，避免 agent 空回复循环。
+        text = f"[图片]（图片内容：{desc}）" if desc else "[图片]"
+        replaced = False
+        for i, comp in enumerate(event.message_obj.message):
+            if isinstance(comp, Image):
+                event.message_obj.message[i] = Plain(text)
+                replaced = True
+        if not replaced:
+            event.message_obj.message.append(Plain(text))
+        # 关键：只改消息链不够。AstrBot 的 agent 构建 LLM prompt 用的是
+        # event.message_str（事件创建时由适配器冻结的字符串，plugin 过滤器改不到它），
+        # 而不是改后的消息链——所以这里必须把描述同步写回 message_str，否则
+        # LLM 只会看到 "[图片]" 占位，就会像之前那样回一句空文本 + 表情包。
+        # 这与 AstrBot 自身 STT 的写法一致（preprocess_stage 替换组件后同样回写
+        # message_str），标准消息和 agent follow-up 消息两条路径都走 message_str。
+        event.message_str = event.message_str.replace("[图片]", text, len(imgs))
+        event.message_obj.message_str = event.message_obj.message_str.replace(
+            "[图片]", text, len(imgs)
+        )
+        logger.info(
+            f"[hanhan] 图片消息已替换为文本描述: {text[:60]}{'…' if len(text) > 60 else ''}"
+        )
+
     # ---------- 结果装饰钩子：分条发送 + 表情包 ----------
 
     @on_decorating_result()
@@ -157,6 +246,9 @@ class HanhanPersonaPlugin(Star):
         parts = parse_reply(text)
         sid = self._session_id(event)
         self.memory.on_reply(sid, text)  # 检测"要去忙/睡了"等意图
+
+        # 模拟真人节奏再回复：基础打字延迟 + 间隔越久越慢 + 说过要去忙则"忙完回来"
+        await self._human_pause(sid)
 
         if len(parts) <= 1 and parts and parts[0][0] == "text":
             # 单条纯文本：仅当去掉了结尾句号时才重写，否则交给默认流程
@@ -190,6 +282,10 @@ class HanhanPersonaPlugin(Star):
     @llm_tool(name="send_hanhan_sticker")
     async def send_hanhan_sticker(self, event: AstrMessageEvent, emotion: str):
         """发送一张憨憨表情包（按情绪匹配，如开心、无语、生气时用）。
+
+        表情包只起配合作用：调用时仍必须同时用文字正常回复用户（例如回应图片
+        内容、接住话题），表情包不能单独作为一条回复——只有表情包没有文字会
+        显得像没看到消息。
 
         Args:
             emotion(string): 情绪词，1-2 个字描述当前情绪，如：开心、无语、生气、害羞、难过、敷衍、疑问、亲亲、思考中。

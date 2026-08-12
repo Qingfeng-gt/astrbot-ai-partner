@@ -3,3 +3,8 @@ __pycache__/
 *.pyo
 *.zip
 data/
+# 百炼 API Key（本地文件，不进版本库）
+bailian.key
+
+# IDE 配置
+.idea/

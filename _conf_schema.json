@@ -1,0 +1,20 @@
+{
+  "bailian_api_key": {
+    "description": "百炼 API Key（图片识别，留空关闭）",
+    "type": "string",
+    "hint": "阿里云百炼控制台获取，格式 sk-xxx。也可用环境变量 HANHAN_BAILIAN_API_KEY 或插件目录 bailian.key",
+    "obvious_hint": true
+  },
+  "bailian_endpoint": {
+    "description": "百炼 OpenAI 兼容端点",
+    "type": "string",
+    "default": "https://llm-pb05pratj1qqv8yw.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+    "hint": "专属推理服务端点，一般无需修改"
+  },
+  "bailian_model": {
+    "description": "多模态模型名",
+    "type": "string",
+    "default": "",
+    "hint": "公共模型填 qwen-vl-plus 等；专属部署可留空"
+  }
+}
