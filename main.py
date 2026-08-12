@@ -57,7 +57,7 @@ _SITUATION_MARK = "<!-- hanhan-situation -->"
 _PLUGIN_DIR = Path(__file__).parent
 # 插件名/版本（Web API 路由前缀与页面展示用，版本与 metadata.yaml 同步）
 _PLUGIN_NAME = "astrbot_plugin_hanhan"
-_PLUGIN_VERSION = "1.0.29"
+_PLUGIN_VERSION = "1.0.30"
 
 
 def _fmt_window(window: tuple[int, int]) -> str:
