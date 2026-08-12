@@ -57,7 +57,7 @@ _SITUATION_MARK = "<!-- hanhan-situation -->"
 _PLUGIN_DIR = Path(__file__).parent
 # 插件名/版本（Web API 路由前缀与页面展示用，版本与 metadata.yaml 同步）
 _PLUGIN_NAME = "astrbot_plugin_hanhan"
-_PLUGIN_VERSION = "1.0.33"
+_PLUGIN_VERSION = "1.0.34"
 
 
 def _fmt_window(window: tuple[int, int]) -> str:
@@ -433,10 +433,9 @@ class HanhanPersonaPlugin(Star):
         )
         # 会话粒度开关：session_id -> bool（True 为注入人格）
         self.enabled_sessions: dict[str, bool] = {}
-        # 消息合并缓冲区：session_id -> {components, last_arrival, count}
+        # 消息合并队列：session_id -> {components, deadline, last_arrival, processing}
+        # （用户方案：定时器 + 信息队列，窗口内新消息插入队列并重置定时器）
         self._merge_buffers: dict[str, dict] = {}
-        # 图片识别期间的消息吸收缓冲：session_id -> {components, last_arrival}
-        self._vision_buffers: dict[str, dict] = {}
         # 插件页面（WebUI pages/ 目录）调用的接口：路由必须带插件名前缀
         self.context.register_web_api(
             f"/{_PLUGIN_NAME}/status",
@@ -636,188 +635,148 @@ class HanhanPersonaPlugin(Star):
         if situation:
             req.system_prompt = f"{req.system_prompt}\n{_SITUATION_MARK}\n{situation}"
 
-    async def _absorb_sticker_only(self, event: AstrMessageEvent) -> bool:
-        """纯表情/无实质文本消息（图片表情、误发）：不触发 LLM 回复。
-
-        - 有活跃合并/识别缓冲：并入缓冲，等后续文本消息一起处理
-        - 无缓冲：吞掉本消息，按 sticker_only_prob 概率回一张随机表情包
-          （模拟真实回应），否则静默——表情包只是情绪助词，不值得单独回文字
-        """
-        if not self._is_private(event):
-            return False
-        has_text = any(
-            isinstance(c, Plain) and c.text.strip()
-            for c in event.message_obj.message
-        )
-        if has_text:
-            return False
-        sid = self._session_id(event)
-        if sid in self._merge_buffers or sid in self._vision_buffers:
-            return await self._merge_messages(event)  # 并入现有缓冲
-        prob = float(self.bcfg.get("reply", {}).get("sticker_only_prob", 0.4))
-        if random.random() < prob:
-            img = self.stickers.pick(sid, None)
-            if img is not None:
-                try:
-                    await event.send(MessageChain().file_image(str(ensure_sendable(img))))
-                    self.stickers.record_used(sid, img.name)
-                    self.stickers.record_sent(sid)
-                    logger.info(f"[hanhan] 纯表情消息回应表情包: {img.name}")
-                except Exception as e:
-                    logger.warning(f"[hanhan] 纯表情回应发送失败: {e}")
-        else:
-            logger.info("[hanhan] 纯表情消息已静默（情绪助词，不单独回复）")
-        return True
-
     async def _merge_messages(self, event: AstrMessageEvent) -> bool:
-        """短时间多条消息合并（去抖）：同一私聊会话在窗口内连发的多条消息，
-        吞掉后续消息并入缓冲区，等消息流稳定（对方输入完）后放行第一条，
-        让 LLM 整合回复；窗口超时仍未发完则先回复已收到的部分。
+        """消息合并（队列 + 滑动定时器，用户方案落地）：
 
-        返回 True 表示本消息已被吞掉/正在等待合并（不再走 LLM 管道）。
-        参数：reply.merge_window（窗口秒，0=关闭）、merge_max_wait（额外等待上限）、
-        merge_only_private（仅私聊合并）。
+        1. 收到消息 → 插入队列；定时器窗口（merge_window）内到达的新消息
+           插入队列并重置定时器（滑动窗口，消息流持续就继续等）
+        2. 定时器跑完（对方输入完/消息流稳定）→ 统一处理队列：
+           - 队列里有照片（大图）→ 识别图片，替换为文字描述
+           - 队列里有文本 → 全部文本拼接进第一条消息
+           - 只有表情包（小图）无文本 → 不触发 LLM，按概率回一张表情包或静默
+        3. 放行第一条消息，让 LLM 整合回复（图片解析结果 + 对话内容一起）
+
+        识别照片期间队列保留（processing），期间到达的新消息继续并入，
+        识别完成后一并拼接——保证"发图+问图"不会被拆成两次回复。
+        返回 True 表示本消息已入队/被吞掉（不再走 LLM 管道）。
         """
         if not self._is_private(event):
-            return False  # 群聊不合并（多人消息不能混淆成一条）
+            return False  # 群聊不合并
         if not self.bcfg.get("reply", {}).get("merge_only_private", True):
             return False
-        window = float(self.bcfg.get("reply", {}).get("merge_window", 2.5))
+        window = float(self.bcfg.get("reply", {}).get("merge_window", 3.5))
         if window <= 0:
             return False
         sid = self._session_id(event)
-        # 图片识别期间：后续消息（如"我刚发的图是xxx"）直接吸收，识别完成后拼接
-        vbuf = self._vision_buffers.get(sid)
-        if vbuf is not None:
-            vbuf["components"].append(list(event.message_obj.message))
-            vbuf["last_arrival"] = time.time()
-            logger.info(f"[hanhan] 图片识别期间消息已吸收（{sid}）")
-            return True
         buf = self._merge_buffers.get(sid)
         if buf is not None:
-            # 后续消息：并入缓冲区，吞掉本消息（不触发独立回复）
+            # 队列存在：插入消息并重置定时器（滑动窗口）
             buf["components"].append(list(event.message_obj.message))
+            buf["deadline"] = time.time() + window
             buf["last_arrival"] = time.time()
-            buf["count"] += 1
-            logger.info(f"[hanhan] 消息合并：{sid} 第 {buf['count']} 条并入，等待消息流稳定")
+            logger.info(f"[hanhan] 消息入队（{sid}），定时器重置，队列 {len(buf['components'])} 条")
             return True
-        # 第一条消息：建立缓冲区，等待窗口（消息流持续则顺延，最多窗口+额外等待）
-        self._merge_buffers[sid] = {
-            "components": [list(event.message_obj.message)],
-            "last_arrival": time.time(),
-            "count": 1,
-        }
-        extra_wait = float(self.bcfg.get("reply", {}).get("merge_max_wait", window))
+        # 创建队列 + 定时器
         max_total = float(self.bcfg.get("reply", {}).get("merge_max_total", 15.0))
-        deadline = time.time() + window + extra_wait
-        hard = time.time() + max_total  # 绝对上限：连发消息再多也最多等这么久
+        start = time.time()
+        buf = {
+            "components": [list(event.message_obj.message)],
+            "deadline": time.time() + window,
+            "last_arrival": time.time(),
+            "processing": False,
+        }
+        self._merge_buffers[sid] = buf
         try:
-            while time.time() < deadline and time.time() < hard:
-                await asyncio.sleep(0.3)
-                buf = self._merge_buffers.get(sid)
-                if buf is None:
-                    break
-                # 有新消息：顺延稳定期（最多到绝对上限），覆盖"连发十几条"场景
-                deadline = max(deadline, buf["last_arrival"] + 1.5)
-                # 消息流稳定判定只在窗口期之后生效（至少等满 window+extra）：
-                # 否则第一条创建 1 秒后就被放行，连发消息根本合并不上
-                if time.time() >= deadline and time.time() - buf["last_arrival"] >= 1.2:
-                    break  # 窗口已满且 1.2 秒无新消息，认为对方输入完了
+            while time.time() < buf["deadline"] and time.time() - start < max_total:
+                await asyncio.sleep(0.2)
+                # 定时器由后续消息重置（buf 是同一对象，deadline 被更新）
         finally:
             buf = self._merge_buffers.pop(sid, None)
-        if not buf or buf["count"] <= 1:
-            return False  # 只有一条消息：正常放行
-        # 合并：后续消息的文本并入第一条（Plain 拼接），富媒体组件追加到消息链
-        extra_texts = []
-        for comps in buf["components"][1:]:
-            for comp in comps:
-                if isinstance(comp, Plain):
-                    extra_texts.append(comp.text)
-                else:
-                    event.message_obj.message.append(comp)
+        if not buf or not buf.get("components"):
+            return False
+        # ---- 定时器跑完，统一处理队列 ----
+        all_comps = [c for comps in buf["components"] for c in comps]
+        plain_texts = [
+            c.text for c in all_comps
+            if isinstance(c, Plain) and c.text and c.text.strip()
+        ]
+        imgs = [
+            c for c in all_comps
+            if isinstance(c, Image) and (c.file or c.url or c.path)
+        ]
+        # 大图视为照片（识别回复），小图视为表情包（情绪助词）
+        photo_imgs = []
+        for c in imgs:
+            try:
+                p = getattr(c, "file", "") or getattr(c, "path", "") or ""
+                size = Path(p).stat().st_size if p else 0
+                is_photo = size >= 200 * 1024
+            except OSError:
+                is_photo = True
+            if is_photo:
+                photo_imgs.append(c)
+        if not plain_texts and not photo_imgs:
+            # 纯表情包队列：不触发 LLM，概率回一张表情包或静默
+            prob = float(self.bcfg.get("reply", {}).get("sticker_only_prob", 0.4))
+            if random.random() < prob:
+                img = self.stickers.pick(sid, None)
+                if img is not None:
+                    try:
+                        await event.send(MessageChain().file_image(str(ensure_sendable(img))))
+                        self.stickers.record_used(sid, img.name)
+                        self.stickers.record_sent(sid)
+                        logger.info(f"[hanhan] 纯表情消息回应表情包: {img.name}")
+                    except Exception as e:
+                        logger.warning(f"[hanhan] 纯表情回应发送失败: {e}")
+            else:
+                logger.info("[hanhan] 纯表情消息已静默（情绪助词，不单独回复）")
+            return True
+        # 有文本或有照片：识别照片（识别期间队列保留，新消息继续并入）
+        photo_text = ""
+        extra_comps: list = []
+        if photo_imgs and self.vision.enabled():
+            buf["processing"] = True
+            buf["base_len"] = len(buf["components"])  # 已处理条数（防重复拼接）
+            self._merge_buffers[sid] = buf  # 识别期间继续吸收
+            try:
+                desc = await self.vision.describe(photo_imgs)
+                photo_text = f"[图片]（图片内容：{desc}）" if desc else "[图片]"
+            finally:
+                buf = self._merge_buffers.pop(sid, None)  # 取出（含期间并入）
+            if buf:
+                # 只取识别期间新增的消息（其图片交给下一轮，文本拼进本条）
+                extra_comps = [
+                    c
+                    for comps in buf["components"][buf.get("base_len", 0):]
+                    for c in comps
+                ]
+        elif photo_imgs:
+            photo_text = "[图片]"
+        # ---- 拼接：替换图片为描述 + 追加全部文本到第一条消息 ----
+        first_chain = event.message_obj.message
+        for comp in list(first_chain):
+            if isinstance(comp, Image) and comp in imgs:
+                idx = first_chain.index(comp)
+                first_chain[idx] = Plain(photo_text)
+        extra_texts = list(plain_texts)
+        for comp in extra_comps:
+            if isinstance(comp, Plain) and comp.text and comp.text.strip():
+                extra_texts.append(comp.text)
         if extra_texts:
             joined = "\n".join(t for t in extra_texts if t)
             if joined:
-                event.message_obj.message.append(Plain(joined))
+                first_chain.append(Plain(joined))
                 event.message_str = f"{event.message_str}\n{joined}"
                 event.message_obj.message_str = f"{event.message_obj.message_str}\n{joined}"
-        logger.info(f"[hanhan] 消息合并完成：{sid} 合并 {buf['count']} 条为一条，整合回复")
-        return False
+        logger.info(
+            f"[hanhan] 队列处理完成（{sid}）：照片 {len(photo_imgs)} 张，文本 {len(plain_texts)} 条"
+        )
+        return False  # 放行第一条（内容已整合）
 
     @regex(r"[\s\S]*")
     async def capture_vision(self, event: AstrMessageEvent) -> None:
         """消息过滤器阶段（所有消息都经过，包括 agent 的 follow-up 消息）：
-        检测用户消息里的图片，调百炼识别后把描述写回消息链。
+        短时间多条消息合并（队列 + 滑动定时器），合并后的消息在队列处理中
+        统一做图片识别（照片）与文本拼接，放行时 LLM 拿到的是一条完整消息。
 
         v4.2x 的 agent 模式下图片消息可能作为 follow-up 并入进行中的 agent run，
-        不触发 on_llm_request——所以在更早的 filter 阶段处理，保证 agent 无论哪轮都能看到描述。
-        同时做短时间多条消息合并（详见 _merge_messages）。
+        不触发 on_llm_request——所以在更早的 filter 阶段处理（详见 _merge_messages）。
         """
-        if await self._absorb_sticker_only(event):
-            return  # 纯表情消息：已回应表情包或静默，不触发 LLM
         if await self._merge_messages(event):
-            return  # 已被合并等待/吞掉，不继续走 LLM 管道
-        if not self.vision.enabled():
-            return
-        if self._private_only() and not self._is_private(event):
-            return
-        imgs = [
-            c for c in event.message_obj.message
-            if isinstance(c, Image) and (c.file or c.url or c.path)
-        ]
-        if not imgs:
-            return
-        logger.info(
-            f"[hanhan] 消息过滤器捕获图片消息: 组件 {len(event.message_obj.message)} 个, "
-            f"图片 {len(imgs)} 个, 来源 file={getattr(imgs[0], 'file', '')!r:.60}"
-        )
-        # 识别期间（约 2~10s）同会话的后续消息会被吸收，识别完成后一起拼接，
-        # 避免"发图后又补了文字说明"导致 follow-up 乱序、回复上下文错乱
-        sid = self._session_id(event)
-        self._vision_buffers[sid] = {"components": [], "last_arrival": time.time()}
-        try:
-            desc = await self.vision.describe(imgs)
-        finally:
-            vbuf = self._vision_buffers.pop(sid, None)
-        # 把 Image 组件替换成含描述的文本：v4.2x agent 对图片消息只认 Image 组件
-        # （会尝试 file_read_tool 读图，deepseek 无视觉→空回复），不会读附加文本；
-        # 换成文本后 agent 的消息里只有描述，必能正常回答。
-        # 识别失败也替换为 "[图片]" 占位，避免 agent 空回复循环。
-        text = f"[图片]（图片内容：{desc}）" if desc else "[图片]"
-        replaced = False
-        for i, comp in enumerate(event.message_obj.message):
-            if isinstance(comp, Image):
-                event.message_obj.message[i] = Plain(text)
-                replaced = True
-        if not replaced:
-            event.message_obj.message.append(Plain(text))
-        # 关键：只改消息链不够。AstrBot 的 agent 构建 LLM prompt 用的是
-        # event.message_str（事件创建时由适配器冻结的字符串，plugin 过滤器改不到它），
-        # 而不是改后的消息链——所以这里必须把描述同步写回 message_str，否则
-        # LLM 只会看到 "[图片]" 占位，就会像之前那样回一句空文本 + 表情包。
-        # 这与 AstrBot 自身 STT 的写法一致（preprocess_stage 替换组件后同样回写
-        # message_str），标准消息和 agent follow-up 消息两条路径都走 message_str。
-        event.message_str = event.message_str.replace("[图片]", text, len(imgs))
-        event.message_obj.message_str = event.message_obj.message_str.replace(
-            "[图片]", text, len(imgs)
-        )
-        # 拼接识别期间吸收的后续消息（图片 + 文字说明 → 一条完整消息进 LLM）
-        if vbuf:
-            extra = [c.text for comps in vbuf["components"] for c in comps if isinstance(c, Plain)]
-            extra = [t for t in extra if t]
-            if extra:
-                joined = "\n".join(extra)
-                event.message_obj.message.append(Plain(joined))
-                event.message_str = f"{event.message_str}\n{joined}"
-                event.message_obj.message_str = f"{event.message_obj.message_str}\n{joined}"
-                logger.info(f"[hanhan] 图片识别期间吸收 {len(extra)} 条文本已拼接")
-        logger.info(
-            f"[hanhan] 图片消息已替换为文本描述: {text[:60]}{'…' if len(text) > 60 else ''}"
-        )
+            return  # 已入队/被吞掉，不继续走 LLM 管道
 
     # ---------- 结果装饰钩子：分条发送 + 表情包 ----------
 
-    @on_decorating_result()
     async def _safe_send(self, event: AstrMessageEvent, chain, label: str = "") -> bool:
         """带容错的发送：失败重试一次（微信偶发 prepare failed/频率限制），
         仍失败则记录日志并继续（不中断整个回复的其他消息）。"""
@@ -834,6 +793,7 @@ class HanhanPersonaPlugin(Star):
                 logger.error(f"[hanhan] 发送失败({label})，重试仍失败，放弃该条: {e2}")
                 return False
 
+    @on_decorating_result()
     async def handle_result(self, event: AstrMessageEvent) -> None:
         """发送前处理 LLM 结果：分条、去句号、[表情包:情绪词] 换图片。"""
         if not self._persona_enabled(event):
