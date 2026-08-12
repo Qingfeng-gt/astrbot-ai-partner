@@ -152,7 +152,7 @@ class MemoryEngine:
         # 时段提示：让回复贴合当下的她
         hour = now_dt.hour
         if hour >= 23 or hour < 5:
-            parts.append("现在是深夜——你放下防备、话多的时段，可以说心里话、发语音式的话")
+            parts.append("现在是深夜——你放下防备、话多的时段，可以说心里话")
         elif hour < 18:
             parts.append("现在是白天——你在实习/投简历/刷题，回消息是忙里偷闲")
 

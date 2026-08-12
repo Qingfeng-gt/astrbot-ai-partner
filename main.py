@@ -26,7 +26,12 @@ from typing import Optional
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
-from astrbot.api.event.filter import command, on_decorating_result, on_llm_request
+from astrbot.api.event.filter import (
+    command,
+    on_astrbot_loaded,
+    on_decorating_result,
+    on_llm_request,
+)
 from astrbot.api.message_components import Plain
 from astrbot.api.platform import MessageType
 from astrbot.api.provider import ProviderRequest
@@ -34,6 +39,7 @@ from astrbot.api.star import Context, Star
 
 from .core.memory_engine import MemoryEngine
 from .core.persona_loader import PersonaLoader
+from .core.proactive_sender import ProactiveSender
 from .core.reply_processor import parse_reply
 from .core.sticker_bot import StickerBot
 
@@ -54,6 +60,13 @@ class HanhanPersonaPlugin(Star):
         # 传入人格文本：其中的【时间线】表是身份阶段推算的依据（时间不写死）
         self.memory = MemoryEngine(persona_text=self.persona_text)
         self.stickers = StickerBot(_PLUGIN_DIR / "stickers")
+        # 主动消息：深夜语音/白天分享，随机时段（状态持久化在插件目录）
+        self.proactive = ProactiveSender(
+            context=self.context,
+            persona_text=self.persona_text,
+            sticker_bot=self.stickers,
+            state_file=_PLUGIN_DIR / "proactive_state.json",
+        )
         # 会话粒度开关：session_id -> bool（True 为注入人格）
         self.enabled_sessions: dict[str, bool] = {}
 
@@ -86,6 +99,10 @@ class HanhanPersonaPlugin(Star):
             return  # 群聊不注入人格，走默认回复
         sid = self._session_id(event)
 
+        # 私聊会话自动绑定为主动消息目标（不可更改）
+        self.proactive.record_session(sid)
+        # 懒启动调度循环：插件重载时 on_astrbot_loaded 不会再次触发，这里兜底
+        self.proactive.start()
         # 记录用户消息（供间隔/话题突变判断）
         self.memory.on_user_message(sid, req.prompt or "")
 
@@ -154,7 +171,53 @@ class HanhanPersonaPlugin(Star):
             else:
                 await event.send(MessageChain().message(payload))
 
+    # ---------- 生命周期：主动调度 ----------
+
+    @on_astrbot_loaded()
+    async def on_loaded(self) -> None:
+        """AstrBot 加载完成后启动主动消息调度（深夜语音/白天分享）。"""
+        self.proactive.start()
+
+    async def terminate(self) -> None:
+        """插件卸载/重载时停止主动调度。"""
+        await self.proactive.stop()
+
     # ---------- 命令 ----------
+
+    @command("憨憨主动")
+    async def toggle_proactive(self, event: AstrMessageEvent):
+        """/憨憨主动 —— 切换主动消息开关（私聊自动绑定目标，不可更改）。"""
+        active = self.proactive.set_active(not self.proactive.is_active())
+        yield event.plain_result(f"憨憨主动消息：{'已开启' if active else '已关闭'}")
+        if active:
+            yield event.plain_result(self.proactive.describe())
+
+    @command("憨憨主动状态")
+    async def proactive_status(self, event: AstrMessageEvent):
+        """/憨憨主动状态 —— 查看主动消息的调度与已发状态。"""
+        yield event.plain_result(self.proactive.describe())
+
+    @command("憨憨主动测试")
+    async def proactive_test(self, event: AstrMessageEvent):
+        """/憨憨主动测试 [night|day] —— 预览她此刻会主动说什么（不发送）。"""
+        args = (event.message_str or "").split()
+        kind = args[1].strip().lower() if len(args) > 1 else "night"
+        if kind not in ("night", "day"):
+            yield event.plain_result("用法：/憨憨主动测试 night 或 /憨憨主动测试 day")
+            return
+        text = await self.proactive.preview(kind)
+        label = "深夜" if kind == "night" else "白天"
+        yield event.plain_result(f"【{label}主动预览】她此刻会说：")
+        sid = self._session_id(event)
+        for piece in parse_reply(text):
+            if piece[0] == "text":
+                yield event.plain_result(piece[1])
+            else:
+                img = self.stickers.pick(sid, piece[1])
+                if img:
+                    yield event.plain_result(f"表情包：{img.name}")
+                else:
+                    yield event.plain_result("[表情包]（stickers/ 文件夹为空）")
 
     @command("憨憨开关")
     async def toggle_persona(self, event: AstrMessageEvent):

@@ -10,11 +10,14 @@ desc: |
   - 支持命令：
     - /憨憨开关 —— 按会话切换人格开关
     - /憨憨状态 —— 查看当前会话开关状态
+    - /憨憨主动 —— 切换主动消息开关（私聊自动绑定）
+    - /憨憨主动状态 —— 查看调度与已发状态
+    - /憨憨主动测试 [night|day] —— 预览主动消息内容
   - 人格提示词在 persona/persona_prompt.md（单一 md），可直接编辑
 
   ## 安装
   将本文件夹复制到 AstrBot 插件目录（data/plugins/ 或 addons/），或在 WebUI 插件管理安装本压缩包，然后重载插件。
-version: 1.0.6
+version: 1.0.7
 author: Qingfeng-gt
 repo: https://github.com/Qingfeng-gt/astrbot-ai-partner
 tags:
