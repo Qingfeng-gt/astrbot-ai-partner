@@ -43,17 +43,27 @@
 - **忙碌节奏**：她说过"去忙/睡了/上课"之后 2 小时内，回复按自己的节奏，不秒回
 - **遗忘**：上下文超过 30 条自动截断更早的对话，并提示她"更早的事记不清了"——被问到旧细节会模糊、不确定
 
+## 消息支持
+
+- **人格只在私聊会话生效**（前任人格在群里不合适）：群聊消息走 AstrBot 默认回复，不注入人格、不拆分、不发表情包
+- 私聊判断在钩子内部完成（AstrBot 的 LLM 钩子调度不检查 `@event_message_type` 过滤器，这是 v4 的实现特性）
+- 想允许群聊也启用：把 `main.py` 里的 `_PERSONA_ONLY_PRIVATE = True` 改成 `False`
+
 ## 模块结构（多文件）
 
 ```
 astrbot_plugin_hanhan/
-├── main.py              # 编排层：Star 类、钩子、命令
-├── persona_loader.py    # 人格提示词加载
-├── reply_processor.py   # LLM 回复解析（分条/去句号/表情包标记）
-├── sticker_bot.py       # 表情包选择（情绪匹配/同义词/防重复/限频）
-├── memory_engine.py     # 情景感知（时间间隔/话题突变/遗忘/忙碌）
-├── persona_prompt.md    # 人格内容（可自行编辑）
-└── stickers/            # 表情包文件夹
+├── main.py              # 编排层（必须根目录）
+├── metadata.yaml        # 插件元数据（必须根目录）
+├── core/                # 业务逻辑包
+│   ├── __init__.py
+│   ├── persona_loader.py    # 人格提示词加载
+│   ├── reply_processor.py   # LLM 回复解析（分条/去句号/表情包标记）
+│   ├── sticker_bot.py       # 表情包选择（情绪匹配/同义词/防重复/限频）
+│   ├── memory_engine.py     # 情景感知（时间间隔/话题突变/遗忘/忙碌）
+│   └── persona_prompt.md    # 人格内容（可自行编辑）
+├── stickers/            # 表情包文件夹（用户直接管理）
+└── README.md
 ```
 
 ## 自定义

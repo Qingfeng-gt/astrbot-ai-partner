@@ -5,17 +5,19 @@
 使 bot 以憨憨的身份、记忆和说话方式回复。
 
 模块结构：
-- main.py            编排层：Star 类、钩子、命令（本文件）
-- persona_loader.py  人格提示词加载
-- reply_processor.py LLM 回复解析（分条/去句号/表情包标记）
-- sticker_bot.py     表情包选择（情绪匹配/防重复/限频）
-- memory_engine.py   情景感知（时间间隔/话题突变/遗忘/忙碌）
+- main.py            编排层：Star 类、钩子、命令（本文件，必须位于根目录）
+- metadata.yaml      插件元数据（必须位于根目录）
+- core/              业务逻辑包：persona_loader / reply_processor /
+                     sticker_bot / memory_engine / persona_prompt.md
+- stickers/          表情包文件夹（用户直接管理，位于根目录）
 
 行为特性：
+- 人格仅在私聊会话生效（前任人格不适合群聊）；群聊消息走默认回复
 - @on_llm_request：注入人格 + 情景感知（间隔、话题突变、遗忘提示）+ 上下文截断
 - @on_decorating_result：按行拆成多条消息依次发送；[表情包:情绪词] 换图片；
   消息结尾单句号强制去除；每轮最多 1 张表情包且有限频
-- 注意：v4.x 钩子为装饰器注册制；流式输出时装饰阶段不生效，建议关闭流式输出
+- 注意：v4.x 钩子为装饰器注册制，且钩子调度不检查事件过滤器，
+  私聊判断需在函数内部完成；流式输出时装饰阶段不生效
 """
 
 from pathlib import Path
@@ -25,25 +27,28 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.event.filter import command, on_decorating_result, on_llm_request
 from astrbot.api.message_components import Plain
+from astrbot.api.platform import MessageType
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star
 
-from .memory_engine import MemoryEngine
-from .persona_loader import PersonaLoader
-from .reply_processor import parse_reply
-from .sticker_bot import StickerBot
+from .core.memory_engine import MemoryEngine
+from .core.persona_loader import PersonaLoader
+from .core.reply_processor import parse_reply
+from .core.sticker_bot import StickerBot
 
 # 注入标记：用于防止重复注入
 _PERSONA_MARK = "<!-- hanhan-persona -->"
 _SITUATION_MARK = "<!-- hanhan-situation -->"
 _PLUGIN_DIR = Path(__file__).parent
+# 人格是否仅在私聊会话生效（前任人格在群里不合适，默认 True）
+_PERSONA_ONLY_PRIVATE = True
 
 
 class HanhanPersonaPlugin(Star):
     def __init__(self, context: Context, config: Optional[AstrBotConfig] = None):
         super().__init__(context)
         self.config = config or {}
-        self.persona = PersonaLoader(_PLUGIN_DIR / "persona_prompt.md")
+        self.persona = PersonaLoader(_PLUGIN_DIR / "core" / "persona_prompt.md")
         self.persona_text = self.persona.load()
         self.memory = MemoryEngine()
         self.stickers = StickerBot(_PLUGIN_DIR / "stickers")
@@ -61,6 +66,13 @@ class HanhanPersonaPlugin(Star):
     def _persona_enabled(self, event: AstrMessageEvent) -> bool:
         return self.enabled_sessions.get(self._session_id(event), True)
 
+    def _is_private(self, event: AstrMessageEvent) -> bool:
+        """是否私聊会话（LLM 钩子调度不检查事件过滤器，需内部判断）。"""
+        try:
+            return event.get_message_type() == MessageType.FRIEND_MESSAGE
+        except Exception:
+            return False
+
     # ---------- LLM 请求钩子：人格 + 情景感知 ----------
 
     @on_llm_request()
@@ -68,6 +80,8 @@ class HanhanPersonaPlugin(Star):
         """LLM 请求前：注入人格与情景感知，截断过长上下文（只修改 req）。"""
         if not self.persona_text or not self._persona_enabled(event):
             return
+        if _PERSONA_ONLY_PRIVATE and not self._is_private(event):
+            return  # 群聊不注入人格，走默认回复
         sid = self._session_id(event)
 
         # 记录用户消息（供间隔/话题突变判断）
@@ -93,6 +107,8 @@ class HanhanPersonaPlugin(Star):
         """发送前处理 LLM 结果：分条、去句号、[表情包:情绪词] 换图片。"""
         if not self._persona_enabled(event):
             return
+        if _PERSONA_ONLY_PRIVATE and not self._is_private(event):
+            return  # 群聊不处理人格回复格式
         result = event.get_result()
         if (
             result is None
