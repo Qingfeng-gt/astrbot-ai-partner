@@ -30,7 +30,8 @@
     "merge_only_private": true,
     "max_reply_parts": 6,
     "merge_max_total": 15.0,
-    "sticker_only_prob": 0.4
+    "sticker_only_prob": 0.4,
+    "send_interval": 0.5
   },
   "sticker": {
     "avoid_repeat": 2,

@@ -57,7 +57,7 @@ _SITUATION_MARK = "<!-- hanhan-situation -->"
 _PLUGIN_DIR = Path(__file__).parent
 # 插件名/版本（Web API 路由前缀与页面展示用，版本与 metadata.yaml 同步）
 _PLUGIN_NAME = "astrbot_plugin_hanhan"
-_PLUGIN_VERSION = "1.0.32"
+_PLUGIN_VERSION = "1.0.33"
 
 
 def _fmt_window(window: tuple[int, int]) -> str:
@@ -143,7 +143,8 @@ _DEFAULT_BEHAVIOR: dict = {
         "merge_only_private": True,
         "max_reply_parts": 6,
         "merge_max_total": 15.0,
-        "sticker_only_prob": 0.4
+        "sticker_only_prob": 0.4,
+        "send_interval": 0.5
       },
       "sticker": {
         "avoid_repeat": 2,
@@ -372,6 +373,7 @@ _DEFAULT_BEHAVIOR: dict = {
         "describe_prompt": "你是憨憨的眼睛。用户刚刚给憨憨发了一张图片，请客观、简短地描述图片内容：画面主体、场景、图片里的文字（如果有）。200 字以内，只描述，不评价，不要揣测发图人的意图。"
       }
     }
+
 
 
 
@@ -816,6 +818,22 @@ class HanhanPersonaPlugin(Star):
     # ---------- 结果装饰钩子：分条发送 + 表情包 ----------
 
     @on_decorating_result()
+    async def _safe_send(self, event: AstrMessageEvent, chain, label: str = "") -> bool:
+        """带容错的发送：失败重试一次（微信偶发 prepare failed/频率限制），
+        仍失败则记录日志并继续（不中断整个回复的其他消息）。"""
+        try:
+            await event.send(chain)
+            return True
+        except Exception as e:
+            logger.warning(f"[hanhan] 发送失败({label})，1 秒后重试: {e}")
+            await asyncio.sleep(1.0)
+            try:
+                await event.send(chain)
+                return True
+            except Exception as e2:
+                logger.error(f"[hanhan] 发送失败({label})，重试仍失败，放弃该条: {e2}")
+                return False
+
     async def handle_result(self, event: AstrMessageEvent) -> None:
         """发送前处理 LLM 结果：分条、去句号、[表情包:情绪词] 换图片。"""
         if not self._persona_enabled(event):
@@ -876,13 +894,14 @@ class HanhanPersonaPlugin(Star):
             if payload == text.strip():
                 return
             event.clear_result()
-            await event.send(MessageChain().message(payload))
+            await self._safe_send(event, MessageChain().message(payload), "单条文本")
             return
 
         # 清空默认结果，所有消息按序主动发送，保证分条顺序
         event.clear_result()
         max_stickers = int(self.bcfg.get("reply", {}).get("max_stickers_per_reply", 1))
         sent_sticker = 0  # 每轮回复表情包上限（可配置）
+        send_interval = float(self.bcfg.get("reply", {}).get("send_interval", 0.5))
         for kind, payload in parts:
             if kind == "img":
                 if sent_sticker >= max_stickers or self.stickers.is_rate_limited(sid):
@@ -891,12 +910,17 @@ class HanhanPersonaPlugin(Star):
                 if img is None:
                     logger.warning("[hanhan] stickers/ 文件夹为空或不存在，跳过表情包")
                     continue
-                await event.send(MessageChain().file_image(str(ensure_sendable(img))))
-                self.stickers.record_used(sid, img.name)
-                self.stickers.record_sent(sid)
-                sent_sticker += 1
+                ok = await self._safe_send(
+                    event, MessageChain().file_image(str(ensure_sendable(img))), "表情包"
+                )
+                if ok:
+                    self.stickers.record_used(sid, img.name)
+                    self.stickers.record_sent(sid)
+                    sent_sticker += 1
             else:
-                await event.send(MessageChain().message(payload))
+                await self._safe_send(event, MessageChain().message(payload), "文本")
+            if len(parts) > 1:
+                await asyncio.sleep(send_interval)  # 分条间隔：避免微信频率限制
 
     # ---------- 插件页面（WebUI）接口 ----------
 
