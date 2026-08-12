@@ -3,8 +3,8 @@
   "private_only": true,
   "reply": {
     "base_delay": [
-      1.5,
-      4.0
+      1.0,
+      2.5
     ],
     "busy_delay": [
       20,
@@ -22,12 +22,13 @@
       6,
       15
     ],
-    "max_delay": 120,
+    "max_delay": 60,
     "max_stickers_per_reply": 1,
     "boost_prob": 0.35,
-    "merge_window": 2.5,
+    "merge_window": 3.5,
     "merge_max_wait": 2.5,
-    "merge_only_private": true
+    "merge_only_private": true,
+    "max_reply_parts": 6
   },
   "sticker": {
     "avoid_repeat": 2,

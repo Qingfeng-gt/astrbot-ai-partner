@@ -57,7 +57,7 @@ _SITUATION_MARK = "<!-- hanhan-situation -->"
 _PLUGIN_DIR = Path(__file__).parent
 # 插件名/版本（Web API 路由前缀与页面展示用，版本与 metadata.yaml 同步）
 _PLUGIN_NAME = "astrbot_plugin_hanhan"
-_PLUGIN_VERSION = "1.0.30"
+_PLUGIN_VERSION = "1.0.31"
 
 
 def _fmt_window(window: tuple[int, int]) -> str:
@@ -116,8 +116,8 @@ _DEFAULT_BEHAVIOR: dict = {
       "private_only": True,
       "reply": {
         "base_delay": [
-          1.5,
-          4.0
+          1.0,
+          2.5
         ],
         "busy_delay": [
           20,
@@ -135,12 +135,13 @@ _DEFAULT_BEHAVIOR: dict = {
           6,
           15
         ],
-        "max_delay": 120,
+        "max_delay": 60,
         "max_stickers_per_reply": 1,
         "boost_prob": 0.35,
-        "merge_window": 2.5,
+        "merge_window": 3.5,
         "merge_max_wait": 2.5,
-        "merge_only_private": True
+        "merge_only_private": True,
+        "max_reply_parts": 6
       },
       "sticker": {
         "avoid_repeat": 2,
@@ -372,6 +373,7 @@ _DEFAULT_BEHAVIOR: dict = {
 
 
 
+
 class HanhanPersonaPlugin(Star):
     def __init__(self, context: Context, config: Optional[AstrBotConfig] = None):
         super().__init__(context)
@@ -428,6 +430,8 @@ class HanhanPersonaPlugin(Star):
         self.enabled_sessions: dict[str, bool] = {}
         # 消息合并缓冲区：session_id -> {components, last_arrival, count}
         self._merge_buffers: dict[str, dict] = {}
+        # 图片识别期间的消息吸收缓冲：session_id -> {components, last_arrival}
+        self._vision_buffers: dict[str, dict] = {}
         # 插件页面（WebUI pages/ 目录）调用的接口：路由必须带插件名前缀
         self.context.register_web_api(
             f"/{_PLUGIN_NAME}/status",
@@ -644,6 +648,13 @@ class HanhanPersonaPlugin(Star):
         if window <= 0:
             return False
         sid = self._session_id(event)
+        # 图片识别期间：后续消息（如"我刚发的图是xxx"）直接吸收，识别完成后拼接
+        vbuf = self._vision_buffers.get(sid)
+        if vbuf is not None:
+            vbuf["components"].append(list(event.message_obj.message))
+            vbuf["last_arrival"] = time.time()
+            logger.info(f"[hanhan] 图片识别期间消息已吸收（{sid}）")
+            return True
         buf = self._merge_buffers.get(sid)
         if buf is not None:
             # 后续消息：并入缓冲区，吞掉本消息（不触发独立回复）
@@ -714,7 +725,14 @@ class HanhanPersonaPlugin(Star):
             f"[hanhan] 消息过滤器捕获图片消息: 组件 {len(event.message_obj.message)} 个, "
             f"图片 {len(imgs)} 个, 来源 file={getattr(imgs[0], 'file', '')!r:.60}"
         )
-        desc = await self.vision.describe(imgs)
+        # 识别期间（约 2~10s）同会话的后续消息会被吸收，识别完成后一起拼接，
+        # 避免"发图后又补了文字说明"导致 follow-up 乱序、回复上下文错乱
+        sid = self._session_id(event)
+        self._vision_buffers[sid] = {"components": [], "last_arrival": time.time()}
+        try:
+            desc = await self.vision.describe(imgs)
+        finally:
+            vbuf = self._vision_buffers.pop(sid, None)
         # 把 Image 组件替换成含描述的文本：v4.2x agent 对图片消息只认 Image 组件
         # （会尝试 file_read_tool 读图，deepseek 无视觉→空回复），不会读附加文本；
         # 换成文本后 agent 的消息里只有描述，必能正常回答。
@@ -737,6 +755,16 @@ class HanhanPersonaPlugin(Star):
         event.message_obj.message_str = event.message_obj.message_str.replace(
             "[图片]", text, len(imgs)
         )
+        # 拼接识别期间吸收的后续消息（图片 + 文字说明 → 一条完整消息进 LLM）
+        if vbuf:
+            extra = [c.text for comps in vbuf["components"] for c in comps if isinstance(c, Plain)]
+            extra = [t for t in extra if t]
+            if extra:
+                joined = "\n".join(extra)
+                event.message_obj.message.append(Plain(joined))
+                event.message_str = f"{event.message_str}\n{joined}"
+                event.message_obj.message_str = f"{event.message_obj.message_str}\n{joined}"
+                logger.info(f"[hanhan] 图片识别期间吸收 {len(extra)} 条文本已拼接")
         logger.info(
             f"[hanhan] 图片消息已替换为文本描述: {text[:60]}{'…' if len(text) > 60 else ''}"
         )
@@ -765,6 +793,18 @@ class HanhanPersonaPlugin(Star):
         parts = parse_reply(text)
         sid = self._session_id(event)
         self.memory.on_reply(sid, text)  # 检测"要去忙/睡了"等意图
+
+        # 回复条数上限：超过则把后面的文本合并成一条（避免"发了一大堆"）
+        max_parts = int(self.bcfg.get("reply", {}).get("max_reply_parts", 6))
+        if len(parts) > max_parts:
+            head, tail = parts[:max_parts], parts[max_parts:]
+            tail_texts = [p[1] for p in tail if p[0] == "text" and p[1]]
+            tail_imgs = [p for p in tail if p[0] == "img"]
+            if tail_texts:
+                head.append(("text", "\n".join(tail_texts)))
+            head.extend(tail_imgs)
+            parts = head
+            logger.info(f"[hanhan] 回复条数超限，{len(tail)} 条合并为 1 条")
 
         # 补发表情包：LLM 这轮没标表情包时，按概率从回复文本推断情绪补一张
         # （提升使用频率；限频时跳过，避免刷屏）
@@ -942,6 +982,11 @@ class HanhanPersonaPlugin(Star):
                 if not 0 <= v <= 1:
                     raise ValueError
                 rp["boost_prob"], updated["reply.boost_prob"] = v, v
+            if "max_reply_parts" in data:
+                v = int(data["max_reply_parts"])
+                if not 1 <= v <= 20:
+                    raise ValueError
+                rp["max_reply_parts"], updated["reply.max_reply_parts"] = v, v
             for key in ("merge_window", "merge_max_wait"):
                 if key in data:
                     v = float(data[key])

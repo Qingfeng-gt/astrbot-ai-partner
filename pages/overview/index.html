@@ -212,6 +212,10 @@
           <input type="number" id="rp-max-stickers" min="1" max="10" style="width: 70px" />
         </div>
         <div class="cfg-row">
+          <label>回复条数上限（超过的文本合并成一条，避免刷屏）</label>
+          <input type="number" id="rp-max-parts" min="1" max="20" style="width: 70px" />
+        </div>
+        <div class="cfg-row">
           <label>消息合并窗口（秒）：同会话连发多条时等对方输入完再整合回复（0=关闭）</label>
           <input type="number" id="rp-merge-window" min="0" max="60" style="width: 70px" />
           <span class="muted">秒 + 额外等待</span>
@@ -486,6 +490,7 @@
           setPair("rp-busy-min", "rp-busy-max", rp.busy_delay);
           if (rp.max_delay != null) $("rp-max-delay").value = rp.max_delay;
           if (rp.max_stickers_per_reply != null) $("rp-max-stickers").value = rp.max_stickers_per_reply;
+          if (rp.max_reply_parts != null) $("rp-max-parts").value = rp.max_reply_parts;
           if (rp.merge_window != null) $("rp-merge-window").value = rp.merge_window;
           if (rp.merge_max_wait != null) $("rp-merge-extra").value = rp.merge_max_wait;
           $("m-boost").value = Math.round((rp.boost_prob != null ? rp.boost_prob : st.boost_prob) * 100);
@@ -526,6 +531,7 @@
                 busy_delay: [Number($("rp-busy-min").value), Number($("rp-busy-max").value)],
                 max_delay: Number($("rp-max-delay").value),
                 max_stickers_per_reply: Number($("rp-max-stickers").value),
+                max_reply_parts: Number($("rp-max-parts").value),
                 merge_window: Number($("rp-merge-window").value),
                 merge_max_wait: Number($("rp-merge-extra").value),
                 boost_prob: Number($("m-boost").value) / 100,
